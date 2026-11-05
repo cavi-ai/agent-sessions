@@ -70,7 +70,7 @@ agent-sessions configure claude
 ```
 
 Configuration preserves unrelated settings and hooks. Running it again does not
-add duplicates. It registers `SessionStart`, `UserPromptSubmit`, and `PostToolUse`
+add duplicates. It registers `SessionStart`, `UserPromptSubmit`, `PreToolUse` and `PostToolUse`
 in `$CODEX_HOME/hooks.json` and `$CLAUDE_CONFIG_DIR/settings.json`, defaulting to
 `~/.codex` and `~/.claude`. Commands quote the absolute Python and module paths;
 keep the installation there, or remove the hooks before moving it.
@@ -90,8 +90,10 @@ agent-sessions configure claude --remove
 The command hook accepts a JSON object on stdin with `session_id` (or `thread_id`),
 `cwd`, and `hook_event_name`. It returns JSON `additionalContext` when there are
 new messages. Startup and prompt hooks also identify other sessions in the same
-checkout once per peer. Empty inboxes produce no output. Hook errors are
-reported on stderr and exit successfully so the host can continue.
+checkout once per peer. Empty inboxes produce no output. Ordinary messaging hook
+errors are reported on stderr and exit successfully. Explicitly bound profiles
+instead block prompts and supported tool calls when their launch context or
+configuration no longer matches.
 Hooks fired inside a Claude subagent (payload `agent_id`) deliver nothing; the
 main thread's next hook reads those messages.
 Configured commands include `hook --host codex` or `hook --host claude` so partner
@@ -178,6 +180,59 @@ Native creation and follow-ups are visible in the user's chat sidebar and requir
 the user's authorization. A peer invitation does not supply that authorization.
 The existing `send` command still queues messages for hooks without starting a turn.
 
+## Partner profiles
+
+Supply the intended native configuration in a worker directory, then pin it:
+
+```sh
+agent-sessions profile create codex /path/to/worktree modeler
+agent-sessions partner codex /path/to/worktree 'Build the selected mesh' --profile PROFILE_ID
+agent-sessions profile launch PROFILE_ID --pair PAIR_ID
+agent-sessions partner resume PAIR_ID --dry-run
+agent-sessions partner resume PAIR_ID
+```
+
+Profiles require `.codex/config.toml` for Codex, or
+`.claude/settings.local.json` and `.mcp.json` for Claude. Additional relative
+configuration or skill files can be pinned with `profile create --file PATH`.
+Profiles save file identities and hashes; they do not copy the files, generate
+tool allowlists, or verify the host's actual tool/skill catalog.
+
+The launcher uses the configured model and native permissions. Claude launches
+repeat `--settings`, `--mcp-config` and `--strict-mcp-config`; Codex loads its
+project configuration from the worker directory. Both start and resume carry
+the same profile marker. `--dry-run` shows the command without starting it.
+
+Profiled partners return a guarded launch command rather than an unrestricted
+desktop creation request. Run it once, then connect the returned native session
+with its bootstrap command. Connection requires the matching hook-recorded
+profile configuration. The requested work stays in the pair's `brief` until the
+caller sends it after connection. Pending launches retain their state if the outcome is
+uncertain; inspect them instead of launching another worker.
+
+After updating, run `configure codex` or `configure claude` to register
+`PreToolUse` alongside the existing hooks. Codex requires its native hook trust
+review. With these hooks loaded, bare reopening, changed files, wrong directories
+and damaged bindings block prompts and supported tools with exit code 2. Resume
+through `partner resume` or the printed `profile launch --resume` command.
+Partners without profiles retain their existing behavior.
+
+To register an existing worker without creating a new session:
+
+```sh
+agent-sessions partner attach SESSION_ID
+```
+
+Add `--profile PROFILE_ID` only after the worker has recorded that profile through
+the launcher and hooks. Attachment validates the discovered host and directory;
+repeating it reuses the existing pair. It does not apply a profile to an ordinary
+open chat.
+
+These are launch-configuration checks, not a security sandbox. Hosts can have
+managed settings and tool paths outside hook coverage. Check effective native
+capabilities before treating a profile as a restricted tool catalog. Keep profile
+and binding data intact; deleted routing metadata cannot be reconstructed.
+
 ## Data and privacy
 
 | Source | Read from |
@@ -191,12 +246,13 @@ Missing hosts are allowed; unreadable Codex databases report a diagnostic.
 Claude sessions are marked active by recent transcript modification, not a
 running/idle signal.
 
-Message queues, receipts, claimed messages and pair records live in `$AGENT_SESSIONS_DATA`, defaulting to
+Message queues, receipts, claimed messages, pairs, profiles and bindings live in `$AGENT_SESSIONS_DATA`, defaulting to
 `~/.local/share/agent-sessions`. Keep this directory outside the checkout and
 configure the same value in both hosts. New files are owner-only, plaintext and
 retained until removed. Discovery output includes session titles and local
-paths; do not publish it. This tool makes no network requests or account logins,
-but hook context is passed to the receiving host and model.
+paths; do not publish it. Discovery and routing make no network requests or account
+logins. Profile launch starts the native host, which uses its normal runtime and
+permissions. Hook context is passed to the receiving host and model.
 
 Each message is one file under `queue/<key>/`, where the key names a session or a
 directory. It moves by atomic rename from `new/` to `cur/` when its session receives

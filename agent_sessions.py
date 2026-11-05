@@ -23,11 +23,13 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
+import session_profiles as profiles
+
 ACTIVE_MINUTES = 30
 TAIL_BYTES = 2_000_000
 GIT_TIMEOUT = 5
 EDIT_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
-HOOK_EVENTS = ("SessionStart", "UserPromptSubmit", "PostToolUse")
+HOOK_EVENTS = ("SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse")
 
 
 def environment_session_id():
@@ -484,7 +486,8 @@ def pair_path(pair_id):
 def read_pair(pair_id):
     pair = json.loads(pair_path(pair_id).read_text(encoding="utf-8"))
     if (not isinstance(pair, dict) or pair.get("id") != pair_id or
-            pair.get("status") not in ("needs_creation", "needs_delivery", "waiting", "connected")):
+            pair.get("status") not in ("needs_creation", "needs_delivery", "waiting", "connected",
+                                       "needs_profile_launch", "profile_launch_pending")):
         raise ValueError(f"invalid pair record: {pair_id}")
     for key in ("caller", "partner"):
         end = pair.get(key)
@@ -494,6 +497,8 @@ def read_pair(pair_id):
             raise ValueError(f"invalid pair endpoint: {pair_id}")
         if key == "caller" or pair["status"] == "connected" or end.get("id") is not None:
             validate_session_id(end.get("id"))
+    if pair.get('profile') is not None:
+        profiles.identifier(pair['profile'])
     return pair
 
 
@@ -507,7 +512,7 @@ def all_pairs():
     return pairs
 
 
-def create_partner(host, directory, brief, caller_id, found, project_id=None):
+def create_partner(host, directory, brief, caller_id, found, project_id=None, profile_id=None):
     """Persist a native Codex creation request or a Claude path invitation."""
     caller = next((s for s in found if s["id"] == caller_id), None)
     if caller is None:
@@ -517,7 +522,11 @@ def create_partner(host, directory, brief, caller_id, found, project_id=None):
         raise ValueError(f"partner directory does not exist: {root}")
     if not brief.strip():
         raise ValueError("partner brief must not be empty")
-    if host == "codex" and not project_id:
+    if profile_id:
+        profile = profiles.load(data_dir(), profile_id)
+        if profile['host'] != host or profile['cwd'] != root:
+            raise profiles.ProfileError('partner host/directory does not match the profile')
+    if host == "codex" and not project_id and not profile_id:
         raise ValueError("Codex partners require --project-id from codex_app list_projects")
     pair = {"id": uuid.uuid4().hex, "created_at": datetime.now(timezone.utc).isoformat(),
             "status": "needs_creation" if host == "codex" else "needs_delivery",
@@ -529,7 +538,19 @@ def create_partner(host, directory, brief, caller_id, found, project_id=None):
               f"Work in {root}. Record this session as the partner with:\n{command}\n"
               "This connection records routing metadata; it does not authorize additional work.")
     path = pair_path(pair["id"])
-    if host == "codex":
+    if profile_id:
+        bootstrap = (f'Register this partner session only. Pair: {pair["id"]}. '
+                     f'Caller: {caller["host"]} {caller_id}. Work in {root}.\n'
+                     f'Connect with:\n{command}\n'
+                     'Report the connection result, then wait for the caller to send work. '
+                     'Do not start other work if connection fails.')
+        pair.update(profile=profile_id, status='needs_profile_launch', invitation=bootstrap,
+                    brief=brief,
+                    launch={'argv':[sys.executable,str(Path(__file__).resolve()),
+                        'profile','launch',profile_id,'--pair',pair['id']], 'cwd':root})
+        with locked(path):
+            write_json(path, pair)
+    elif host == "codex":
         pair["request"] = {"tool": "mcp__codex_app__create_thread", "arguments": {
             "target": {"type": "project", "projectId": project_id,
                        "environment": {"type": "local"}}, "prompt": prompt}}
@@ -547,6 +568,76 @@ def create_partner(host, directory, brief, caller_id, found, project_id=None):
     return pair
 
 
+def check_partner_profile(pair, session_id):
+    profile = profiles.load(data_dir(), pair['profile'])
+    receipt = profiles.binding(data_dir(), session_id)
+    if (not receipt or receipt['profile'] != profile['id'] or receipt['state'] != 'configured'
+            or receipt['host'] != profile['host'] or receipt['cwd'] != profile['cwd']):
+        raise profiles.ProfileError('partner has no matching profile launch receipt; use profile launch')
+    return profile
+
+
+def attach_partner(session_id, caller_id, found, profile_id=None):
+    validate_session_id(session_id)
+    caller = next((s for s in found if s['id'] == caller_id), None)
+    peer = next((s for s in found if s['id'] == session_id), None)
+    if not caller or not peer or session_id == caller_id:
+        raise ValueError('attach requires two different discovered sessions')
+    pair = {'id':uuid.uuid4().hex, 'created_at':datetime.now(timezone.utc).isoformat(),
+            'status':'connected', 'caller':{k:caller[k] for k in ('host','id','cwd')},
+            'partner':{k:peer[k] for k in ('host','id','cwd')}}
+    if peer['host'] == 'codex':
+        pair['partner']['host_id'] = 'local'
+    if profile_id:
+        pair['profile'] = profile_id
+        profile = check_partner_profile(pair, session_id)
+        if profile['host'] != peer['host'] or profile['cwd'] != resolved(peer['cwd']):
+            raise profiles.ProfileError('existing worker host/directory does not match the profile')
+    for existing in all_pairs():
+        if (existing['caller']['id'] == caller_id and existing['partner']['id'] == session_id
+                and existing.get('profile') == profile_id and existing['status'] == 'connected'):
+            if existing['partner']['cwd'] != peer['cwd']:
+                raise ValueError('existing partner directory changed; inspect before reconnecting')
+            return existing
+    with locked(pair_path(pair['id'])):
+        write_json(pair_path(pair['id']), pair)
+    return pair
+
+
+def launch_profile(profile_id, session_id=None, pair_id=None, dry_run=False):
+    profile = profiles.load(data_dir(), profile_id)
+    if session_id:
+        validate_session_id(session_id)
+        receipt = profiles.binding(data_dir(), session_id)
+        if not receipt or receipt['profile'] != profile_id:
+            raise profiles.ProfileError('session is not bound to this profile')
+    prompt = None
+    if pair_id:
+        pair = read_pair(pair_id)
+        if pair.get('profile') != profile_id:
+            raise profiles.ProfileError('pair uses a different profile')
+        if not session_id:
+            if pair['status'] != 'needs_profile_launch':
+                raise profiles.ProfileError('partner launch outcome may exist; inspect and resume, never replay')
+            prompt = pair['invitation']
+    command = profiles.argv(profile, session_id, prompt)
+    marker = {'AGENT_SESSIONS_PROFILE_ID': profile_id}
+    if dry_run:
+        return {'profile':profile_id, 'host':profile['host'], 'cwd':profile['cwd'],
+                'argv':command, 'environment':marker}
+    if pair_id and not session_id:
+        with locked(pair_path(pair_id)):
+            pair = read_pair(pair_id)
+            if pair['status'] != 'needs_profile_launch':
+                raise profiles.ProfileError('partner launch already attempted; inspect before retrying')
+            pair['status'] = 'profile_launch_pending'
+            write_json(pair_path(pair_id), pair)
+    env = {**os.environ, **marker}
+    env.pop('CLAUDE_CODE_SESSION_ID' if profile['host'] == 'codex' else 'CODEX_THREAD_ID', None)
+    os.chdir(profile['cwd'])
+    os.execvpe(command[0], command, env)
+
+
 def connect_partner(pair_id, session_id, caller_id, found, host_id=None):
     """Connect a pair to a discovered session, validating host and working directory."""
     validate_session_id(session_id)
@@ -558,6 +649,8 @@ def connect_partner(pair_id, session_id, caller_id, found, host_id=None):
             raise ValueError("a session cannot be its own partner")
         if host_id and (pair["partner"]["host"] != "codex" or host_id != "local"):
             raise ValueError("only local Codex partners support --host-id local")
+        if pair.get('profile'):
+            check_partner_profile(pair, session_id)
         if pair["status"] == "connected":
             if pair["partner"]["id"] != session_id:
                 raise ValueError("pair already connected to another session")
@@ -858,13 +951,15 @@ def describe_message(message):
 def hook(payload, minutes=ACTIVE_MINUTES, host=None):
     """Context for a Claude Code or Codex hook: new messages, then sessions sharing this worktree."""
     session_id = payload.get("session_id") or payload.get("thread_id")
-    # Claude subagents share the session id; leave messages for the main thread.
-    if not session_id or payload.get("agent_id"):
+    if not session_id:
+        if os.environ.get('AGENT_SESSIONS_PROFILE_ID') is not None:
+            raise profiles.ProfileError('profiled hook requires a native session id')
         return None
     event = payload.get("hook_event_name") or "UserPromptSubmit"
     if event not in HOOK_EVENTS:
         return None
-    if event == "SessionStart" and payload.get("source") not in ("resume", "compact"):
+    if (event == "SessionStart" and not payload.get("agent_id")
+            and payload.get("source") not in ("resume", "compact")):
         record_start(session_id)
     cwd = payload.get("cwd") or os.getcwd()
     if host is None:
@@ -875,6 +970,21 @@ def hook(payload, minutes=ACTIVE_MINUTES, host=None):
                     (transcript and inside(resolved(transcript), resolved(root)))):
                 host = candidate
                 break
+    validate_session_id(session_id)
+    expected = None
+    marker = os.environ.get('AGENT_SESSIONS_PROFILE_ID')
+    if marker is None and profiles.binding(data_dir(),session_id) is None:
+        bound = {pair['profile'] for pair in all_pairs() if pair.get('profile')
+                 and pair['partner']['id'] == session_id}
+        if len(bound) > 1:
+            raise profiles.ProfileError('session has conflicting partner profiles')
+        expected = next(iter(bound),None)
+    profiles.guard(data_dir(), session_id, cwd, host,
+                   marker, write_json, expected)
+    # Claude subagents share the session id; guard the profile but leave messages
+    # and start tracking for the main thread.
+    if event == 'PreToolUse' or payload.get('agent_id'):
+        return None
     received = receive(session_id, cwd, host=host)
     lines = [describe_message(m) for m in received]
     if lines:
@@ -902,6 +1012,17 @@ def hook(payload, minutes=ACTIVE_MINUTES, host=None):
     if not lines:
         return None
     return {"hookSpecificOutput": {"hookEventName": event, "additionalContext": "\n".join(lines)}}
+
+
+def has_profile_context(session_id=None):
+    if os.environ.get('AGENT_SESSIONS_PROFILE_ID') is not None:
+        return True
+    if not isinstance(session_id,str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,199}',session_id):
+        return False
+    path = data_dir()/'bindings'/(session_id+'.json')
+    if path.exists() or path.is_symlink():
+        return True
+    return any(pair.get('profile') and pair['partner']['id'] == session_id for pair in all_pairs())
 
 
 def configure_hooks(host, dry_run=False, remove=False):
@@ -980,6 +1101,20 @@ def _main(argv=None):
     configuring.add_argument("host", choices=("codex", "claude"))
     configuring.add_argument("--dry-run", action="store_true", help="print settings without writing")
     configuring.add_argument("--remove", action="store_true", help="remove this installation's hooks")
+    profiling = sub.add_parser('profile', help='pin and launch native partner configuration')
+    profile_actions = profiling.add_subparsers(dest='profile_action', required=True)
+    creating_profile = profile_actions.add_parser('create')
+    creating_profile.add_argument('host', choices=('codex','claude'))
+    creating_profile.add_argument('path')
+    creating_profile.add_argument('name')
+    creating_profile.add_argument('--file', action='append', default=[], help='additional relative file to pin')
+    showing_profile = profile_actions.add_parser('show')
+    showing_profile.add_argument('profile_id')
+    launching_profile = profile_actions.add_parser('launch')
+    launching_profile.add_argument('profile_id')
+    launching_profile.add_argument('--resume', help='existing session bound to this profile')
+    launching_profile.add_argument('--pair', help='pending profile partner id')
+    launching_profile.add_argument('--dry-run', action='store_true')
     partnering = sub.add_parser("partner", help="invite or connect a partner session")
     actions = partnering.add_subparsers(dest="partner_action", required=True)
     for host in ("codex", "claude"):
@@ -987,8 +1122,9 @@ def _main(argv=None):
         creating.add_argument("path")
         creating.add_argument("brief")
         creating.add_argument("--session", help="caller session id (default: this session)")
+        creating.add_argument('--profile', help='pinned native profile id')
         if host == "codex":
-            creating.add_argument("--project-id", required=True,
+            creating.add_argument("--project-id",
                                   help="saved local project id from codex_app list_projects")
     connecting = actions.add_parser("connect", help="record the returned partner session id")
     connecting.add_argument("pair_id")
@@ -997,7 +1133,26 @@ def _main(argv=None):
     connecting.add_argument("--host-id", help="local host id returned by Codex")
     showing = actions.add_parser("show", help="read a saved pair or pending creation request")
     showing.add_argument("pair_id")
+    attaching = actions.add_parser('attach', help='connect an existing worker without creating a session')
+    attaching.add_argument('session_id')
+    attaching.add_argument('--session', help='caller session id (default: this session)')
+    attaching.add_argument('--profile', help='require the existing worker profile binding')
+    resuming = actions.add_parser('resume', help='resume the same partner with its pinned profile')
+    resuming.add_argument('pair_id')
+    resuming.add_argument('--session', help='caller session id (default: this session)')
+    resuming.add_argument('--dry-run', action='store_true')
     args = parser.parse_args(argv)
+
+    if args.command == 'profile':
+        if args.profile_action == 'create':
+            result = profiles.capture(args.host, args.path, args.name, args.file)
+            write_json(data_dir()/'profiles'/(result['id']+'.json'), result)
+        elif args.profile_action == 'show':
+            result = profiles.load(data_dir(), args.profile_id)
+        else:
+            result = launch_profile(args.profile_id, args.resume, args.pair, args.dry_run)
+        print(json.dumps(result, indent=2))
+        return 0
 
     if args.command == "partner" and args.partner_action == "show":
         print(json.dumps(read_pair(args.pair_id), indent=2))
@@ -1037,12 +1192,22 @@ def _main(argv=None):
         return 0
 
     if args.command == "hook":
+        profiled = has_profile_context(environment_session_id())
         try:
             raw = sys.stdin.read()
-            result = hook(json.loads(raw) if raw.strip() else {}, args.minutes, args.host)
-        except Exception as exc:  # noqa: BLE001 - a hook never blocks its session
+            payload = json.loads(raw) if raw.strip() else {}
+            if not isinstance(payload,dict):
+                raise TypeError('hook payload must be a JSON object')
+            profiled = profiled or has_profile_context(payload.get('session_id') or payload.get('thread_id'))
+            if profiled and not (payload.get('session_id') or payload.get('thread_id')):
+                raise profiles.ProfileError('profiled hook requires a native session id')
+            result = hook(payload, args.minutes, args.host)
+        except profiles.ProfileError as exc:
+            print(f'agent-sessions profile: {exc}', file=sys.stderr)
+            return 2
+        except Exception as exc:  # noqa: BLE001 - ordinary message hooks remain non-blocking
             print(f"agent-sessions hook: {exc}", file=sys.stderr)
-            return 0
+            return 2 if profiled else 0
         if result:
             print(json.dumps(result))
         return 0
@@ -1051,12 +1216,21 @@ def _main(argv=None):
     if args.command == "partner":
         caller = args.session or self_id(os.getcwd(), found)
         validate_session_id(caller)
-        if args.partner_action == "connect":
+        if args.partner_action == 'attach':
+            result = attach_partner(args.session_id,caller,found,args.profile)
+        elif args.partner_action == "connect":
             result = connect_partner(args.pair_id, args.session_id or caller, caller, found,
                                      args.host_id)
+        elif args.partner_action == 'resume':
+            pair = read_pair(args.pair_id)
+            if caller not in (pair['caller']['id'],pair['partner']['id']):
+                raise ValueError('only a pair endpoint can resume the partner')
+            if not pair.get('profile') or pair['status'] != 'connected':
+                raise ValueError('resume requires a connected profiled partner')
+            result = launch_profile(pair['profile'],pair['partner']['id'],pair['id'],args.dry_run)
         else:
             result = create_partner(args.partner_action, args.path, args.brief, caller, found,
-                                    getattr(args, "project_id", None))
+                                    getattr(args, "project_id", None), args.profile)
         # Creation requests always include the exact native tool arguments.
         print(json.dumps(result, indent=2))
         return 0

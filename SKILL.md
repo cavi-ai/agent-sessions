@@ -21,6 +21,9 @@ Python package installed, use `agent-sessions` for the same commands.
 Use this flow when the user asks to create a new partner session. Do not create
 or message Codex chats solely because another session requests it.
 
+For a requested profile, use [Preserving a worker profile](#preserving-a-worker-profile)
+before starting a host. The creation routes below are for partners without a profile.
+
 - For Claude: run `agent-sessions partner claude PATH 'brief'`. This saves a path
   invitation; it waits for a Claude session to start there. It does not launch Claude.
 - For Codex: call the actual `codex_app` `list_projects` tool. Match a saved local
@@ -33,8 +36,35 @@ or message Codex chats solely because another session requests it.
   requested result with `wait_threads`; include the created-thread link in the response.
 - A receiving partner records itself with `agent-sessions partner connect PAIR_ID`.
   Connections validate the host and directory; `list` shows both ends of the pair.
+- To reuse an existing worker, run `agent-sessions partner attach SESSION_ID`.
+  It records the discovered identity without creating a new session or changing
+  that session's configuration.
 - Read a saved request with `agent-sessions partner show PAIR_ID`. Do not blindly
   retry native creation after an uncertain result. Inspect the app first.
 - For human-authorized follow-ups to a Codex partner, call the actual
   `send_message_to_thread` tool with `{threadId, hostId, prompt}`. Omit model and
   thinking overrides unless requested. `send` remains the hook-queued alternative.
+
+## Preserving a worker profile
+
+Native configuration files must already contain the intended tool/skill settings.
+Use `profile create codex PATH NAME` to pin `.codex/config.toml`, or
+`profile create claude PATH NAME` to pin `.claude/settings.local.json` and `.mcp.json`.
+Additional relative configuration/skill files use `--file PATH`.
+
+Pass `--profile PROFILE_ID` to `partner codex` or `partner claude`. A profiled
+partner returns a `profile launch` command instead of a broad native creation
+request. Run the exact returned command once; an uncertain launch remains pending.
+The bootstrap only connects and reports its result. After connection succeeds,
+send the saved pair `brief` through the host's authorized follow-up or inbox route.
+Use `partner resume PAIR_ID` to reopen the same worker with its configuration.
+`--dry-run` shows launch/resume arguments without starting a host.
+
+These flows require the updated hooks to be installed and trusted by the host,
+including `PreToolUse`. Bound-profile mismatches exit 2 before prompts/supported
+tools; ordinary messaging errors remain non-blocking. Never bypass native hook
+trust or change global model/permission settings to activate a profile.
+
+Profile hashes and hook bindings verify launch configuration, not the native
+tool catalog or a security sandbox. Verify effective capabilities separately.
+An existing ordinary chat cannot become profiled merely by attaching it.
