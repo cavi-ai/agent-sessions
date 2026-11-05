@@ -280,3 +280,60 @@ enabled_tools = ["inspect"]
         with self.assertRaises(ValueError):
             managed_runs.run('invalid-pair')
         self.assertEqual({s: signal.getsignal(s) for s in previous}, previous)
+
+    def test_fresh_idle_thread_does_not_need_materialized_history(self):
+        self.native(reject_empty_history=True)
+        self.assertEqual(self.run_pair()['status'], 'completed')
+        self.assertNotIn('thread/turns/list', self.methods())
+
+    def test_unsubmitted_attention_reconciles_only_explicit_native_absence(self):
+        self.native(unexpected_tool=True)
+        first = self.run_pair()
+        saved = json.loads(self.run_tool('partner', 'show', self.pair['id']))['last_run']
+        self.native(unexpected_tool=False, native_absent=True)
+        second = self.run_pair()
+        self.assertEqual(second['status'], 'completed')
+        self.assertNotEqual(second['session_id'], first['session_id'])
+        pair = json.loads(self.run_tool('partner', 'show', self.pair['id']))
+        prior = pair['reconciled_preassignment'][0]
+        self.assertEqual(prior['session_id'], first['session_id'])
+        self.assertEqual(prior['last_run'], saved)
+        self.assertEqual([p['method'] for p in prior['absence']],
+                         ['thread/read', 'thread/turns/list'])
+
+    def test_history_backend_failure_does_not_authorize_replacement(self):
+        self.native(unexpected_tool=True)
+        self.run_pair()
+        self.native(unexpected_tool=False, native_absent=True, history_error=True)
+        self.assertEqual(self.run_pair()['status'], 'attention')
+        self.assertEqual(self.methods().count('thread/start'), 1)
+        saved = json.loads(self.run_tool('partner', 'show', self.pair['id']))['last_run']
+        self.assertIn('-32603', saved['error'])
+        self.assertIn('history backend unavailable', saved['error'])
+
+    def test_submitted_receipt_cannot_reconcile_a_missing_native_thread(self):
+        self.native(unexpected_tool=True)
+        self.run_pair()
+        path = self.data/'pairs'/(self.pair['id']+'.json')
+        pair = json.loads(path.read_text())
+        pair['last_run']['turn_submitted'] = True
+        path.write_text(json.dumps(pair))
+        self.native(unexpected_tool=False, native_absent=True)
+        before = self.methods()
+        self.assertEqual(self.run_pair()['status'], 'attention')
+        self.assertEqual(self.methods(), before)
+        self.assertEqual(self.methods().count('thread/start'), 1)
+
+    def test_missing_completed_thread_is_not_replaced(self):
+        self.run_pair()
+        self.native(native_absent=True)
+        self.assertEqual(self.run_pair()['status'], 'attention')
+        self.assertEqual(self.methods().count('thread/start'), 1)
+
+    def test_foreign_native_caller_cannot_assign_through_another_pair(self):
+        path = self.data/'pairs'/(self.pair['id']+'.json')
+        before = path.read_bytes()
+        self.env['CODEX_THREAD_ID'] = 'foreign-coordinator'
+        self.assertEqual(self.run_pair()['status'], 'attention')
+        self.assertEqual(self.methods(), [])
+        self.assertEqual(path.read_bytes(), before)

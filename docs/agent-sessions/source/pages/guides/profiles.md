@@ -102,6 +102,16 @@ interrupts only the turn owned by that run and closes its transport. SIGTERM and
 SIGINT use the same cancellation path. Failed or
 unknown runs are retained and are not replayed or replaced by later runs.
 
+Fresh idle threads use their explicitly empty returned history before the first
+turn is submitted. If a preassignment `attention` session later disappears, two
+exact native absence responses are required before replacing it. The pair retains
+the prior ID, receipt and absence evidence. Submitted or uncertain runs cannot use
+this reconciliation. Native error codes and bounded messages appear in `last_run`.
+
+When invoked from a native session, `partner run` requires that session to be one
+of the pair's endpoints. Terminal use without a native session identity remains
+available.
+
 ## What the launcher preserves
 
 Both hosts use their configured model and native permission settings. Claude

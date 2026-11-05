@@ -28,6 +28,16 @@ class Attention(ValueError):
     """A capability or ownership check prevents assigning work."""
 
 
+class NativeError(Attention):
+    """Bounded native error details, without unrelated server data."""
+
+    def __init__(self, method, error):
+        self.method = method
+        self.code = error.get('code')
+        self.message = str(error.get('message', ''))[:800]
+        super().__init__(f'native RPC rejected: {method} [{self.code}]: {self.message}')
+
+
 class Rpc:
     def __init__(self, profile, overrides):
         env = dict(os.environ)
@@ -87,7 +97,7 @@ class Rpc:
             message = self.next(deadline)
             if message.get('id') == request_id:
                 if 'error' in message:
-                    raise Attention('native RPC rejected: '+method)
+                    raise NativeError(method, message['error'])
                 return message['result']
             if message.get('method') in ('turn/completed', 'item/completed'):
                 if len(self.events) >= 32:
@@ -160,11 +170,30 @@ def capabilities(config):
 
 def latest_turn(client, session_id, deadline):
     result = client.request('thread/turns/list', {'threadId': session_id, 'limit': 1,
-                            'sortDirection': 'desc'}, deadline)
+                            'sortDirection': 'desc', 'itemsView': 'notLoaded'}, deadline)
     turns = result['data']
     if len(turns) > 1:
         raise Attention('native latest-turn response was not bounded')
     return turns[0] if turns else None
+
+
+def preassignment_absence(client, session_id, deadline):
+    """Both native reads must report the exact missing persisted/live identity."""
+    proof = []
+    for method, params in (
+            ('thread/read', {'threadId': session_id, 'includeTurns': True}),
+            ('thread/turns/list', {'threadId': session_id, 'limit': 1,
+                                 'sortDirection': 'desc', 'itemsView': 'notLoaded'})):
+        try:
+            client.request(method, params, deadline)
+        except NativeError as exc:
+            if exc.code != -32600 or exc.message != 'thread not loaded: '+session_id:
+                raise
+            proof.append({'method': method, 'params': params,
+                          'error': {'code': exc.code, 'message': exc.message}})
+        else:
+            return None
+    return proof
 
 
 def discovered_tools(client, session_id, expected, deadline):
@@ -192,6 +221,7 @@ def discovered_tools(client, session_id, expected, deadline):
 
 
 def execute(pair, receipt, persist, timeout, filename):
+    previous = pair.get('last_run', {})
     profile = profiles.load(storage.data_dir(), pair['profile'])
     if profile['host'] != 'codex' or pair['partner']['host'] != 'codex':
         raise Attention('managed runs require a Codex profile and partner')
@@ -220,6 +250,21 @@ def execute(pair, receipt, persist, timeout, filename):
         session_id = receipt['session_id']
         if session_id:
             guard()
+            eligible = (previous.get('status') == 'attention' and previous.get('phase') == 'bound'
+                        and previous.get('turn_id') is None
+                        and previous.get('expected_turn_id') is None
+                        and previous.get('turn_submitted', False) is False)
+            absence = preassignment_absence(client, session_id, deadline) if eligible else None
+            if absence:
+                retired = pair.setdefault('reconciled_preassignment', [])
+                if not isinstance(retired, list) or len(retired) >= 8:
+                    raise Attention('preassignment reconciliation history requires attention')
+                retired.append({'session_id': session_id, 'last_run': previous, 'absence': absence})
+                pair['partner']['id'] = None
+                pair['status'] = 'needs_profile_launch'
+                receipt['session_id'] = session_id = None
+                persist('preflight', 'attention')
+        if session_id:
             latest = latest_turn(client, session_id, deadline)
             if ((latest or {}).get('id') != receipt['expected_turn_id'] or
                     latest and latest.get('status') not in ('completed', 'failed', 'interrupted')):
@@ -252,10 +297,15 @@ def execute(pair, receipt, persist, timeout, filename):
             raise Attention('native thread has concurrent active work')
         receipt['capabilities']['mcp_tools'] = discovered_tools(client, native_id, expected, deadline)
         guard()
-        latest = latest_turn(client, native_id, deadline)
-        if ((latest or {}).get('id') != receipt['expected_turn_id'] or
-                latest and latest.get('status') not in ('completed', 'failed', 'interrupted')):
-            raise Attention('native turn changed or became active before assignment')
+        if method == 'thread/start':
+            if thread.get('turns') != []:
+                raise Attention('fresh native thread must return an explicit empty turn history')
+        else:
+            latest = latest_turn(client, native_id, deadline)
+            if ((latest or {}).get('id') != receipt['expected_turn_id'] or
+                    latest and latest.get('status') not in ('completed', 'failed', 'interrupted')):
+                raise Attention('native turn changed or became active before assignment')
+        receipt['turn_submitted'] = True
         persist('submitting', 'unknown')
         turn = client.request('turn/start', {'threadId': native_id,
                               'input': [{'type': 'text', 'text': prompt}]}, deadline)['turn']
@@ -307,11 +357,20 @@ def _run(pair_id, timeout, prompt_file):
     receipt = {'pair_id': pair_id, 'session_id': pair['partner']['id'],
         'profile_id': pair.get('profile'), 'turn_id': None,
         'expected_turn_id': previous.get('turn_id') or previous.get('expected_turn_id'),
+        'turn_submitted': False,
         'status': 'attention', 'output_text': '', 'prompt_sha256': None,
         'capabilities': {'mcp_tools': {}, 'automatic_skill_context': False}}
-    if previous.get('status') in ('unknown', 'failed'):
-        return {key: previous[key] for key in FIELDS}
     try:
+        caller = storage.environment_session_id()
+        if caller:
+            storage.validate_session_id(caller)
+            if caller not in (pair['caller']['id'], pair['partner']['id']):
+                raise Attention('only a pair endpoint can run the partner')
+        pending = (previous.get('status') != 'completed' and
+                   (previous.get('turn_submitted') is True or
+                    previous.get('phase') in ('submitting', 'running')))
+        if previous.get('status') in ('unknown', 'failed') or pending:
+            return {key: previous[key] for key in FIELDS}
         with storage.locked(storage.pair_path(pair_id), blocking=False):
             if storage.read_pair(pair_id) != pair:
                 raise Attention('pair changed before ownership was acquired')

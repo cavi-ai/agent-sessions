@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import time
+import uuid
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -13,7 +14,7 @@ path = Path(os.environ['TEST_RPC_STATE'])
 state = json.loads(path.read_text())
 config = session_profiles.tomllib.loads('\n'.join(
     sys.argv[i+1] for i, value in enumerate(sys.argv) if value == '-c'))
-thread_id = '11111111-1111-4111-8111-111111111111'
+thread_id = state.get('native_identity', '11111111-1111-4111-8111-111111111111')
 
 
 def save():
@@ -22,6 +23,10 @@ def save():
 
 def send(value):
     print(json.dumps(value), flush=True)
+
+
+def reject(request, code, message):
+    send({'id': request['id'], 'error': {'code': code, 'message': message}})
 
 
 for line in sys.stdin:
@@ -40,14 +45,35 @@ for line in sys.stdin:
             effective['features']['hooks'] = True
         result = {'config': effective}
     elif method == 'thread/turns/list':
+        if state.get('history_error'):
+            reject(request, -32603, 'history backend unavailable')
+            continue
+        if state.get('native_absent'):
+            reject(request, -32600, 'thread not loaded: '+params['threadId'])
+            continue
+        if state.get('reject_empty_history') and not state.get('turns'):
+            reject(request, -32600, 'thread history has not been materialized')
+            continue
         result = {'data': state.get('turns', []), 'nextCursor': None}
+    elif method == 'thread/read':
+        if state.get('native_absent'):
+            reject(request, -32600, 'thread not loaded: '+params['threadId'])
+            continue
+        result = {'thread': {'id': thread_id, 'cwd': state['cwd'],
+                            'turns': state.get('turns', []), 'status': {'type': 'idle'}}}
     elif method in ('thread/start', 'thread/resume'):
+        if method == 'thread/start':
+            generation = state.get('generation', 0)
+            thread_id = str(uuid.UUID(int=uuid.UUID('11111111-1111-4111-8111-111111111111').int
+                                     + generation))
+            state.update(generation=generation+1, native_absent=False)
         state['native_identity'] = thread_id
         save()
         if state.get('lose_launch'):
             sys.exit(0)
         result = {'thread': {'id': thread_id, 'sessionId': thread_id,
                             'cwd': params.get('cwd', state['cwd']),
+                            'turns': state.get('turns', []),
                             'status': {'type': 'active' if state.get('active') else 'idle'}}}
     elif method == 'mcpServerStatus/list':
         servers = []
@@ -81,7 +107,7 @@ for line in sys.stdin:
         state['interrupted'] = params
         save()
     send({'id': request['id'], 'result': result})
-    if method == 'thread/turns/list' and state.get('stall_before_turn'):
+    if method == 'mcpServerStatus/list' and state.get('stall_before_turn'):
         time.sleep(5)
 
 state['transport_closed'] = True
