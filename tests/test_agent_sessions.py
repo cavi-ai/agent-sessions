@@ -40,6 +40,7 @@ class Machine(unittest.TestCase):
         self.env = {**os.environ, "CODEX_HOME": str(self.codex),
                     "CLAUDE_CONFIG_DIR": str(self.claude), "AGENT_SESSIONS_DATA": str(self.data)}
         self.env.pop("CLAUDE_CODE_SESSION_ID", None)
+        self.env.pop("CODEX_THREAD_ID", None)
         self.now = time.time()
         self.rows = []
         self.codex.mkdir()
@@ -115,7 +116,196 @@ class WhoTests(Machine):
                                  "claude-0006": (False, ["a.txt"])})
 
 
+class PartnerTests(Machine):
+    def test_codex_creation_request_connects_to_a_discovered_session(self):
+        caller = {**self.env, "CLAUDE_CODE_SESSION_ID": "claude-0006"}
+        pair = json.loads(self.run_tool("--json", "partner", "codex", str(self.repo),
+                                       "Check a.txt", "--project-id", "project-001", env=caller))
+        self.assertEqual(pair["status"], "needs_creation")
+        request = pair["request"]
+        self.assertEqual(request["tool"], "mcp__codex_app__create_thread")
+        self.assertEqual(request["arguments"]["target"], {
+            "type": "project", "projectId": "project-001", "environment": {"type": "local"}})
+        self.assertIn("Check a.txt", request["arguments"]["prompt"])
+        self.assertIn(pair["id"], request["arguments"]["prompt"])
+        self.assertIsNone(pair["partner"]["id"])
+        self.assertEqual(json.loads(self.run_tool("partner", "show", pair["id"])), pair)
+        connected = json.loads(self.run_tool("--json", "partner", "connect", pair["id"],
+                                            "codex-main-0001", "--host-id", "local", env=caller))
+        self.assertEqual(connected["status"], "connected")
+        self.assertEqual(connected["partner"]["id"], "codex-main-0001")
+        self.assertEqual(json.loads(self.run_tool("--json", "partner", "connect", pair["id"],
+                                                 "codex-main-0001", env=caller)), connected)
+        sessions = {s["id"]: s for s in json.loads(self.run_tool("--json", "list"))}
+        self.assertEqual(sessions["claude-0006"]["partners"][0]["id"], "codex-main-0001")
+        self.assertEqual(sessions["codex-main-0001"]["partners"][0]["id"], "claude-0006")
+        self.assertIn("partner claude", self.run_tool("list"))
+
+    def test_claude_brief_waits_for_a_future_session_and_records_its_identity(self):
+        target = self.root / "new-project"
+        target.mkdir()
+        caller = {**self.env, "CODEX_THREAD_ID": "codex-main-0001"}
+        pair = json.loads(self.run_tool("--json", "partner", "claude", str(target),
+                                       "Review the parser", env=caller))
+        self.assertEqual(pair["status"], "waiting")
+        self.assertNotIn("request", pair)
+        project = self.claude / "projects" / "new-project"
+        project.mkdir()
+        (project / "future-claude-0007.jsonl").write_text(json.dumps({
+            "type": "user", "cwd": str(target), "message": {"content": "hello"}}) + "\n")
+        recipient = {**self.env, "CLAUDE_CODE_SESSION_ID": "future-claude-0007"}
+        payload = json.dumps({"session_id": "future-claude-0007", "cwd": str(target),
+                              "hook_event_name": "SessionStart"})
+        received = json.loads(self.run_tool("hook", stdin=payload, env=recipient))
+        context = received["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("Review the parser", context)
+        self.assertIn(pair["id"], context)
+        self.assertIn("partner connect", context)
+        connected = json.loads(self.run_tool("--json", "partner", "connect", pair["id"],
+                                            "future-claude-0007", env=recipient))
+        self.assertEqual(connected["status"], "connected")
+        sessions = {s["id"]: s for s in json.loads(self.run_tool("--json", "list"))}
+        self.assertEqual(sessions["codex-main-0001"]["partners"][0]["id"], "future-claude-0007")
+        self.assertEqual(sessions["future-claude-0007"]["partners"][0]["id"], "codex-main-0001")
+        later = json.dumps({"session_id": "later-claude-0008", "cwd": str(target),
+                            "hook_event_name": "PostToolUse"})
+        self.assertEqual(self.run_tool("hook", stdin=later), "")
+
+    def test_parent_can_add_returned_host_after_the_partner_connects_itself(self):
+        caller = {**self.env, "CLAUDE_CODE_SESSION_ID": "claude-0006"}
+        peer = {**self.env, "CODEX_THREAD_ID": "codex-main-0001"}
+        pair = json.loads(self.run_tool("partner", "codex", str(self.repo), "Review",
+                                       "--project-id", "project-001", env=caller))
+        self.run_tool("partner", "connect", pair["id"], env=peer)
+        connected = json.loads(self.run_tool("partner", "connect", pair["id"], "codex-main-0001",
+                                            "--host-id", "local", env=caller))
+        self.assertEqual(connected["partner"]["host_id"], "local")
+
+    def test_connection_rejects_unknown_sessions_wrong_hosts_and_wrong_directories(self):
+        pair = json.loads(self.run_tool("--json", "partner", "codex", str(self.repo), "Review",
+                                       "--project-id", "project-001", "--session", "claude-0006"))
+        for peer in ("not-a-real-session", "claude-0006", "codex-sub-0002"):
+            with self.subTest(peer=peer):
+                result = subprocess.run([sys.executable, str(TOOL), "partner", "connect",
+                                         pair["id"], peer, "--session", "claude-0006"],
+                                        env=self.env, text=True, capture_output=True,
+                                        check=False, timeout=30)
+                self.assertNotEqual(result.returncode, 0)
+                saved = json.loads((self.data / "pairs" / f"{pair['id']}.json").read_text())
+                self.assertEqual(saved["status"], "needs_creation")
+
+    def test_pending_pairs_appear_in_list_without_an_invented_recipient(self):
+        pair = json.loads(self.run_tool("--json", "partner", "claude", str(self.worktree),
+                                       "Review", "--session", "codex-main-0001"))
+        self.assertIsNone(pair["partner"]["id"])
+        sessions = {s["id"]: s for s in json.loads(self.run_tool("--json", "list"))}
+        pending = sessions["codex-main-0001"]["partners"][0]
+        self.assertEqual((pending["status"], pending["host"], pending["id"]),
+                         ("waiting", "claude", None))
+        for path in (self.data / "pairs").iterdir():
+            self.assertEqual(path.stat().st_mode & 0o077, 0)
+
+    def test_queue_failure_preserves_the_invitation_without_claiming_delivery(self):
+        self.data.mkdir()
+        (self.data / "paths").write_text("not a directory")
+        result = subprocess.run([sys.executable, str(TOOL), "partner", "claude",
+                                 str(self.worktree), "Preserve this brief", "--session",
+                                 "codex-main-0001"], env=self.env, text=True,
+                                capture_output=True, check=False, timeout=30)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+        records = list((self.data / "pairs").glob("*.json"))
+        self.assertEqual(len(records), 1)
+        saved = json.loads(records[0].read_text())
+        self.assertEqual(saved["status"], "needs_delivery")
+        self.assertIn("Preserve this brief", saved["invitation"])
+
+
 class MessageTests(Machine):
+    def test_codex_and_claude_can_reply_using_their_native_session_identity(self):
+        codex = {**self.env, "CODEX_THREAD_ID": "codex-main-0001"}
+        claude = {**self.env, "CLAUDE_CODE_SESSION_ID": "claude-0006"}
+        sent = json.loads(self.run_tool("--json", "send", "claude-0006", "Please check a.txt",
+                                        env=codex))
+        self.assertEqual(sent["message"]["from_id"], "codex-main-0001")
+        received = json.loads(self.run_tool("--json", "inbox", env=claude))
+        self.assertEqual([m["text"] for m in received], ["Please check a.txt"])
+        self.run_tool("send", received[0]["from_id"], "Checked a.txt", env=claude)
+        payload = json.dumps({"thread_id": "codex-main-0001", "cwd": str(self.repo),
+                              "hook_event_name": "PostToolUse"})
+        reply = json.loads(self.run_tool("hook", stdin=payload, env=codex))
+        self.assertIn("Checked a.txt", reply["hookSpecificOutput"]["additionalContext"])
+        self.assertEqual(self.run_tool("hook", stdin=payload, env=codex), "")
+        self.assertEqual(json.loads(self.run_tool("--json", "inbox", env=codex)), [])
+        self.assertIn("(this session)", self.run_tool("list", env=codex))
+
+    def test_delivery_does_not_repeat_after_more_than_500_messages(self):
+        inbox = self.data / "inbox" / "codex-main-0001.jsonl"
+        inbox.parent.mkdir(parents=True)
+        inbox.write_text("".join(json.dumps({"id": str(i), "text": "hello", "from": "peer",
+                                            "at": "2026-01-01T00:00:00Z"}) + "\n"
+                                 for i in range(502)))
+        self.assertEqual(len(json.loads(self.run_tool("--json", "inbox", "--session",
+                                                     "codex-main-0001"))), 502)
+        self.assertEqual(json.loads(self.run_tool("--json", "inbox", "--session",
+                                                 "codex-main-0001")), [])
+
+    def test_invalid_session_ids_cannot_escape_the_data_directory(self):
+        result = subprocess.run([sys.executable, str(TOOL), "inbox", "--session", "../../escape"],
+                                env=self.env, capture_output=True, text=True, timeout=30, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("invalid session id", result.stderr)
+
+    def test_message_storage_is_private(self):
+        self.run_tool("send", "codex-main-0001", "private message")
+        self.run_tool("inbox", "--session", "codex-main-0001")
+        for path in self.data.rglob("*"):
+            with self.subTest(path=path.relative_to(self.data)):
+                self.assertEqual(path.stat().st_mode & 0o077, 0)
+        self.assertEqual(self.data.stat().st_mode & 0o077, 0)
+
+    def test_bad_inbox_line_does_not_hide_other_messages(self):
+        self.run_tool("send", "codex-main-0001", "first")
+        inbox = self.data / "inbox" / "codex-main-0001.jsonl"
+        with inbox.open("a") as handle:
+            handle.write("broken json\n")
+        self.run_tool("send", "codex-main-0001", "second")
+        messages = json.loads(self.run_tool("--json", "inbox", "--session", "codex-main-0001"))
+        self.assertEqual([m["text"] for m in messages], ["first", "second"])
+
+    def test_corrupt_delivery_state_is_reported_without_replaying_messages(self):
+        self.run_tool("send", "codex-main-0001", "already delivered")
+        self.run_tool("inbox", "--session", "codex-main-0001")
+        state = self.data / "state" / "codex-main-0001.json"
+        state.write_text("broken json")
+        result = subprocess.run([sys.executable, str(TOOL), "inbox", "--session", "codex-main-0001"],
+                                env=self.env, capture_output=True, text=True, timeout=30, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("delivery state", result.stderr)
+        self.assertEqual(state.read_text(), "broken json")
+
+    def test_concurrent_readers_consume_a_message_only_once(self):
+        self.run_tool("send", "codex-main-0001", "one delivery")
+        command = [sys.executable, str(TOOL), "--json", "inbox", "--session", "codex-main-0001"]
+        processes = [subprocess.Popen(command, env=self.env, stdout=subprocess.PIPE,
+                                      stderr=subprocess.PIPE, text=True) for _ in range(2)]
+        messages = []
+        for process in processes:
+            stdout, stderr = process.communicate(timeout=30)
+            self.assertEqual(process.returncode, 0, stderr)
+            messages.extend(json.loads(stdout))
+        self.assertEqual([m["text"] for m in messages], ["one delivery"])
+
+    def test_unsupported_hook_events_do_not_consume_messages(self):
+        self.run_tool("send", "codex-main-0001", "keep until supported hook")
+        for event in ("Stop", "PreToolUse"):
+            self.assertEqual(self.run_tool("hook", stdin=json.dumps({
+                "session_id": "codex-main-0001", "cwd": str(self.repo),
+                "hook_event_name": event})), "")
+        messages = json.loads(self.run_tool("--json", "inbox", "--session", "codex-main-0001"))
+        self.assertEqual([m["text"] for m in messages], ["keep until supported hook"])
+
     def test_a_message_reaches_each_session_in_a_path_once_through_its_hook(self):
         sent = json.loads(self.run_tool("--json", "send", str(self.worktree), "Use your own worktree",
                                         "--session", "codex-main-0001"))
@@ -152,6 +342,51 @@ class MessageTests(Machine):
     def test_a_hook_without_a_session_or_with_bad_input_stays_silent(self):
         self.assertEqual(self.run_tool("hook", stdin="{}"), "")
         self.assertEqual(self.run_tool("hook", stdin="not json"), "")
+
+
+class HookSetupTests(Machine):
+    def test_configuration_preserves_settings_and_runs_both_hook_commands(self):
+        settings = self.claude / "settings.json"
+        original = {"permissions": {"allow": []}, "hooks": {"PostToolUse": [
+            {"matcher": "Edit", "hooks": [{"type": "command", "command": "true"}]}]}}
+        settings.write_text(json.dumps(original))
+        for host, path, session in (("codex", self.codex / "hooks.json", "codex-main-0001"),
+                                    ("claude", settings, "claude-0006")):
+            with self.subTest(host=host):
+                preview = json.loads(self.run_tool("configure", host, "--dry-run"))
+                self.assertIn("SessionStart", preview["hooks"])
+                if host == "codex":
+                    self.assertFalse(path.exists())
+                else:
+                    self.assertEqual(json.loads(path.read_text()), original)
+                self.run_tool("configure", host)
+                first = path.read_bytes()
+                self.run_tool("configure", host)
+                self.assertEqual(path.read_bytes(), first)
+                config = json.loads(first)
+                command = config["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"]
+                self.run_tool("send", session, "configured delivery")
+                payload = json.dumps({"session_id": session, "cwd": str(self.worktree),
+                                      "hook_event_name": "UserPromptSubmit"})
+                delivered = subprocess.run(command, shell=True, input=payload, env=self.env,
+                                           text=True, capture_output=True, timeout=30, check=False)
+                self.assertEqual(delivered.returncode, 0, delivered.stderr)
+                self.assertIn("configured delivery", json.loads(delivered.stdout)[
+                    "hookSpecificOutput"]["additionalContext"])
+                self.run_tool("configure", host, "--remove")
+                remaining = json.loads(path.read_text())
+                self.assertEqual(remaining, original if host == "claude" else {"hooks": {}})
+
+    def test_invalid_configuration_is_not_overwritten(self):
+        path = self.codex / "hooks.json"
+        for content in ("bad json", '[]', '{"hooks": {"PostToolUse": null}}'):
+            with self.subTest(content=content):
+                path.write_text(content)
+                result = subprocess.run([sys.executable, str(TOOL), "configure", "codex"],
+                                        env=self.env, capture_output=True, text=True, timeout=30,
+                                        check=False)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(path.read_text(), content)
 
 
 if __name__ == "__main__":
