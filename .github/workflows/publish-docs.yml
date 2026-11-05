@@ -1,0 +1,52 @@
+name: Publish documentation
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+      - run: python -m pip install .
+      - name: Build release documentation
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          version="${TAG#v}"
+          commit="$(git rev-parse HEAD)"
+          epoch="$(git show -s --format=%ct "$commit")"
+          python -m scripts.docs.build --version "$version" --tag "$TAG" --commit "$commit" --source-date-epoch "$epoch"
+          python -m scripts.docs.verify --version "$version" --tag "$TAG" --commit "$commit" --source-date-epoch "$epoch"
+          python -m scripts.docs.release_artifact --docs-root "docs/agent-sessions/v${version}" --output "$RUNNER_TEMP/docs-release" --repository "$GITHUB_REPOSITORY" --version "$version" --tag "$TAG" --commit "$commit" --source-date-epoch "$epoch" > "$RUNNER_TEMP/docs-envelope.json"
+      - name: Upload immutable documentation
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          artifact="agent-sessions-docs-${TAG}.tar.gz"
+          existing="$RUNNER_TEMP/existing-$artifact"
+          directory="$RUNNER_TEMP/docs-release"
+          if gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern "$artifact" --output "$existing" 2>/dev/null; then
+            cmp "$existing" "$directory/$artifact"
+          else
+            gh release upload "$TAG" "$directory/$artifact" --repo "$GITHUB_REPOSITORY"
+          fi
+          if gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern "$artifact.sha256" --output "$existing.sha256" 2>/dev/null; then
+            cmp "$existing.sha256" "$directory/$artifact.sha256"
+          else
+            gh release upload "$TAG" "$directory/$artifact.sha256" --repo "$GITHUB_REPOSITORY"
+          fi

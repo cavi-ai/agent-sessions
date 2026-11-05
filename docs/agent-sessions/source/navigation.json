@@ -1,0 +1,79 @@
+{
+  "title": "Agent Sessions",
+  "version": "{{PRODUCT_VERSION}}",
+  "sections": [
+    {
+      "title": "Introduction",
+      "pages": [
+        {
+          "title": "Overview",
+          "path": "introduction/overview.md"
+        },
+        {
+          "title": "Installation",
+          "path": "introduction/installation.md"
+        },
+        {
+          "title": "Quickstart",
+          "path": "introduction/quickstart.md"
+        }
+      ]
+    },
+    {
+      "title": "Guides",
+      "pages": [
+        {
+          "title": "Messaging and claims",
+          "path": "guides/messaging.md"
+        },
+        {
+          "title": "Hook setup",
+          "path": "guides/hooks.md"
+        },
+        {
+          "title": "Partner sessions",
+          "path": "guides/partners.md"
+        },
+        {
+          "title": "Worker profiles",
+          "path": "guides/profiles.md"
+        },
+        {
+          "title": "Troubleshooting",
+          "path": "guides/troubleshooting.md"
+        }
+      ]
+    },
+    {
+      "title": "Reference",
+      "pages": [
+        {
+          "title": "CLI reference",
+          "path": "reference/cli.md"
+        },
+        {
+          "title": "Configuration",
+          "path": "reference/configuration.md"
+        }
+      ]
+    },
+    {
+      "title": "Security",
+      "pages": [
+        {
+          "title": "Security model",
+          "path": "security/model.md"
+        }
+      ]
+    },
+    {
+      "title": "Release",
+      "pages": [
+        {
+          "title": "Version and support",
+          "path": "release/version-and-support.md"
+        }
+      ]
+    }
+  ]
+}
