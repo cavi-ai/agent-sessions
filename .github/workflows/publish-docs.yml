@@ -32,21 +32,33 @@ jobs:
           python -m scripts.docs.build --version "$version" --tag "$TAG" --commit "$commit" --source-date-epoch "$epoch"
           python -m scripts.docs.verify --version "$version" --tag "$TAG" --commit "$commit" --source-date-epoch "$epoch"
           python -m scripts.docs.release_artifact --docs-root "docs/agent-sessions/v${version}" --output "$RUNNER_TEMP/docs-release" --repository "$GITHUB_REPOSITORY" --version "$version" --tag "$TAG" --commit "$commit" --source-date-epoch "$epoch" > "$RUNNER_TEMP/docs-envelope.json"
+          cp "$RUNNER_TEMP/docs-envelope.json" "$RUNNER_TEMP/docs-release/agent-sessions-docs-envelope.json"
       - name: Upload immutable documentation
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event.release.tag_name }}
         run: |
-          artifact="agent-sessions-docs-${TAG}.tar.gz"
-          existing="$RUNNER_TEMP/existing-$artifact"
           directory="$RUNNER_TEMP/docs-release"
-          if gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern "$artifact" --output "$existing" 2>/dev/null; then
-            cmp "$existing" "$directory/$artifact"
-          else
-            gh release upload "$TAG" "$directory/$artifact" --repo "$GITHUB_REPOSITORY"
+          for asset in "agent-sessions-docs-${TAG}.tar.gz" "agent-sessions-docs-${TAG}.tar.gz.sha256" agent-sessions-docs-envelope.json; do
+            existing="$RUNNER_TEMP/existing-$asset"
+            if gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern "$asset" --output "$existing" 2>/dev/null; then
+              cmp "$existing" "$directory/$asset"
+            else
+              gh release upload "$TAG" "$directory/$asset" --repo "$GITHUB_REPOSITORY"
+            fi
+          done
+      - name: Notify documentation site
+        env:
+          GH_TOKEN: ${{ secrets.CONSUMER_DISPATCH_TOKEN }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo 'Automatic site ingestion requires CONSUMER_DISPATCH_TOKEN. The release envelope is available as an asset.' >> "$GITHUB_STEP_SUMMARY"
+            exit 0
           fi
-          if gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern "$artifact.sha256" --output "$existing.sha256" 2>/dev/null; then
-            cmp "$existing.sha256" "$directory/$artifact.sha256"
-          else
-            gh release upload "$TAG" "$directory/$artifact.sha256" --repo "$GITHUB_REPOSITORY"
-          fi
+          python - "$RUNNER_TEMP/docs-envelope.json" > "$RUNNER_TEMP/docs-dispatch.json" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+          print(json.dumps({"event_type": "cavi-oss-release", "client_payload": json.loads(Path(sys.argv[1]).read_text())}))
+          PY
+          gh api --method POST repos/cavi-ai/cavi-home/dispatches --input "$RUNNER_TEMP/docs-dispatch.json"
