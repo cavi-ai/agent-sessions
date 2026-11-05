@@ -70,6 +70,37 @@ An existing worker can be attached with `partner attach SESSION_ID --profile
 PROFILE_ID` only after the worker has recorded that profile through its launcher
 and hooks. Attachment does not apply a profile to an ordinary open chat.
 
+## Run a managed Codex turn
+
+```sh
+agent-sessions partner run PAIR_ID --timeout 60
+agent-sessions partner run PAIR_ID --prompt-file /path/to/prompt.txt --timeout 60
+agent-sessions partner show PAIR_ID
+```
+
+`partner run` owns one App Server process and checks the profile directly, without
+command hooks. The pinned Codex profile must disable `features.hooks`,
+`features.apps`, `features.plugins`, `features.skill_search` and
+`skills.include_instructions`. Every enabled MCP server must declare `enabled_tools`.
+Unexpected inherited servers or discovered tools prevent assignment. Model and
+permission settings retain their native configuration behavior.
+
+The default prompt is the saved pair brief. `--prompt-file` supplies later work
+without changing that brief. It requires a canonical absolute path to a regular
+UTF-8 file, at most 64 KiB. The JSON receipt contains `pair_id`, `session_id`,
+`profile_id`, `turn_id`, `status`, `output_text`, `prompt_sha256` and `capabilities`.
+The capabilities contain checked `mcp_tools` names and `automatic_skill_context:
+false`, which records the required context settings, not a filesystem restriction
+or native asset acceptance. Output text is limited to 64 KiB.
+
+Successful later runs resume the same session and reject active or unexpected
+latest turns. `partner show` exposes the saved `last_run` receipt. `completed`
+means the native turn completed; `failed` means it ended unsuccessfully;
+`attention` means a prerequisite prevented assignment; `unknown` means the native
+outcome needs reconciliation. Only `completed` exits successfully. Timeout
+interrupts only the turn owned by that run and closes its transport. Failed or
+unknown runs are retained and are not replayed or replaced by later runs.
+
 ## What the launcher preserves
 
 Both hosts use their configured model and native permission settings. Claude

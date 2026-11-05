@@ -67,6 +67,7 @@ See [Hook setup](../guides/hooks.md).
 | `partner attach SESSION_ID [--profile PROFILE_ID]` | Record an existing worker |
 | `partner show PAIR_ID` | Inspect a saved pair and its request or launch state |
 | `partner resume PAIR_ID [--dry-run]` | Resume the connected partner with its pinned profile |
+| `partner run PAIR_ID [--prompt-file FILE] [--timeout SECONDS]` | Own one Codex turn with direct profile and capability checks; timeout defaults to 60 seconds |
 
 Creation, connection, attachment and resume accept `--session ID` to identify the
 caller explicitly. `partner resume` requires a connected, profiled partner.
