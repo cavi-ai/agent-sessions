@@ -80,6 +80,10 @@ The command hook accepts a JSON object on stdin with `session_id` (or `thread_id
 new messages. Startup and prompt hooks also identify other sessions in the same
 checkout once per peer. Empty inboxes produce no output. Hook errors are
 reported on stderr and exit successfully so the host can continue.
+Configured commands include `hook --host codex` or `hook --host claude` so partner
+invitations reach the requested host. Older commands can infer the host from
+the transcript path or matching native session environment variable. If the
+host is unknown, ordinary messages still work and partner invitations wait.
 
 Sending queues a message; it does not interrupt an agent or start an idle turn.
 Delivery records prevent repeat reads, including after more than 500 messages.
@@ -104,6 +108,8 @@ show the partner's host, session ID and directory from either end. Pending pairs
 show their state without inventing a recipient. `partner show` reads the saved
 record, including any pending creation request. Pair records are local routing
 metadata; they do not start a daemon or grant account access.
+Unreadable pair records report a diagnostic and are skipped during discovery;
+an invitation with missing or damaged pair metadata does not block other messages.
 
 For **Claude**, the command queues the brief as a path invitation and reports
 `waiting`. It does not launch Claude. The next Claude session under that directory

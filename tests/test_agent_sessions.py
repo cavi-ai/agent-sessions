@@ -117,6 +117,29 @@ class WhoTests(Machine):
 
 
 class PartnerTests(Machine):
+    def test_claude_invitation_is_not_consumed_by_codex_in_the_same_directory(self):
+        pair = json.loads(self.run_tool("partner", "claude", str(self.worktree), "Claude only",
+                                       "--session", "codex-main-0001"))
+        payload = json.dumps({"session_id": "codex-sub-0002", "cwd": str(self.worktree),
+                              "hook_event_name": "PostToolUse"})
+        self.assertEqual(self.run_tool("hook", "--host", "codex", stdin=payload), "")
+        self.assertEqual(json.loads(self.run_tool("--json", "inbox", "--session",
+                                                 "codex-sub-0002")), [])
+        messages = json.loads(self.run_tool("--json", "inbox", "--session", "claude-0006"))
+        self.assertEqual([m["pair_id"] for m in messages], [pair["id"]])
+
+    def test_bad_pair_metadata_does_not_hide_other_sessions_or_messages(self):
+        pair = json.loads(self.run_tool("partner", "claude", str(self.worktree), "Invitation",
+                                       "--session", "codex-main-0001"))
+        self.run_tool("send", "claude-0006", "ordinary message", "--session", "codex-main-0001")
+        (self.data / "pairs" / f"{pair['id']}.json").unlink()
+        (self.data / "pairs" / ("a" * 32 + ".json")).write_text("broken json")
+        sessions = json.loads(self.run_tool("--json", "list"))
+        self.assertEqual({s["id"] for s in sessions},
+                         {"codex-main-0001", "codex-sub-0002", "claude-0006"})
+        messages = json.loads(self.run_tool("--json", "inbox", "--session", "claude-0006"))
+        self.assertEqual([m["text"] for m in messages], ["ordinary message"])
+
     def test_codex_creation_request_connects_to_a_discovered_session(self):
         caller = {**self.env, "CLAUDE_CODE_SESSION_ID": "claude-0006"}
         pair = json.loads(self.run_tool("--json", "partner", "codex", str(self.repo),
@@ -156,7 +179,8 @@ class PartnerTests(Machine):
         recipient = {**self.env, "CLAUDE_CODE_SESSION_ID": "future-claude-0007"}
         payload = json.dumps({"session_id": "future-claude-0007", "cwd": str(target),
                               "hook_event_name": "SessionStart"})
-        received = json.loads(self.run_tool("hook", stdin=payload, env=recipient))
+        received = json.loads(self.run_tool("hook", "--host", "claude", stdin=payload,
+                                            env=recipient))
         context = received["hookSpecificOutput"]["additionalContext"]
         self.assertIn("Review the parser", context)
         self.assertIn(pair["id"], context)
