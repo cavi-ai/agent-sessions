@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import functools
 import hashlib
 import json
 import os
@@ -29,7 +30,35 @@ HOOK_EVENTS = ("SessionStart", "UserPromptSubmit", "PostToolUse")
 
 
 def environment_session_id():
-    return os.environ.get("CODEX_THREAD_ID") or os.environ.get("CLAUDE_CODE_SESSION_ID")
+    """This process's session; when one host runs inside the other, the nearer host wins."""
+    codex, claude = os.environ.get("CODEX_THREAD_ID"), os.environ.get("CLAUDE_CODE_SESSION_ID")
+    if codex and claude and claude_is_nearer():
+        return claude
+    return codex or claude
+
+
+@functools.cache
+def claude_is_nearer():
+    """True when CLAUDE_PID is an ancestor with no Codex process between it and this one."""
+    target = os.environ.get("CLAUDE_PID", "")
+    if not target.isdigit():
+        return False
+    pid = os.getppid()
+    for _ in range(64):
+        if pid == int(target):
+            return True
+        if pid <= 1:
+            return False
+        try:
+            out = subprocess.run(["ps", "-o", "ppid=,comm=", "-p", str(pid)], capture_output=True,
+                                 text=True, timeout=GIT_TIMEOUT, check=False).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            return False
+        parent, _, command = out.partition(" ")
+        if not parent.isdigit() or "codex" in os.path.basename(command.strip()).lower():
+            return False
+        pid = int(parent)
+    return False
 
 
 def validate_session_id(session_id):
@@ -349,8 +378,8 @@ def load_state(session_id):
         if not isinstance(state, dict) or any(
                 not isinstance(state.get(key), list) or
                 any(not isinstance(item, str) for item in state[key])
-                for key in ("delivered", "warned")):
-            raise ValueError("expected delivered and warned lists")
+                for key in ("delivered", "warned")) or not isinstance(state.get("started", ""), str):
+            raise ValueError("expected delivered and warned lists and a started timestamp")
         return state
     except FileNotFoundError:
         return {"delivered": [], "warned": []}
@@ -548,31 +577,42 @@ def unread(session_id, cwd=None, mark=True, host=None):
             messages += [m for m in read_inbox(path)
                          if m.get("path") and inside(here, m["path"])
                          and m.get("from_id") != session_id]
-    fresh_invitations = []
-    for message in messages:
-        if message.get("pair_id"):
-            try:
-                pair = read_pair(message["pair_id"])
-            except (OSError, ValueError, TypeError) as exc:
-                print(f"agent-sessions: skipping invitation with unreadable pair: {exc}",
-                      file=sys.stderr)
-                continue
-            if host != pair["partner"]["host"]:
-                continue
-            if pair["status"] == "connected" and pair["partner"]["id"] != session_id:
-                continue
-        fresh_invitations.append(message)
-    messages = fresh_invitations
     if not messages:
         return []
     with locked(state_path(session_id)):
         state = load_state(session_id)
         seen = set(state["delivered"])
-        fresh = [m for m in messages if m["id"] not in seen]
+        fresh = [m for m in messages if m["id"] not in seen and (
+            not m.get("pair_id") or invited(m["pair_id"], session_id, host, state.get("started")))]
         if mark and fresh:
             state["delivered"] += [m["id"] for m in fresh]
             save_state(session_id, state)
     return fresh
+
+
+def invited(pair_id, session_id, host, started):
+    """An invitation reaches its connected partner, or a session of the requested host that
+    started after the pair was created."""
+    try:
+        pair = read_pair(pair_id)
+        if host != pair["partner"]["host"]:
+            return False
+        if pair["status"] == "connected":
+            return pair["partner"]["id"] == session_id
+        return bool(started) and (datetime.fromisoformat(started) >=
+                                  datetime.fromisoformat(pair["created_at"]))
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        print(f"agent-sessions: skipping invitation with unreadable pair: {exc}", file=sys.stderr)
+        return False
+
+
+def record_start(session_id):
+    """Remember when a session first started, so only later invitations reach it."""
+    with locked(state_path(session_id)):
+        state = load_state(session_id)
+        if not state.get("started"):
+            state["started"] = datetime.now(timezone.utc).isoformat()
+            save_state(session_id, state)
 
 
 def self_id(cwd, found):
@@ -587,11 +627,14 @@ def self_id(cwd, found):
 def hook(payload, minutes=ACTIVE_MINUTES, host=None):
     """Context for a Claude Code or Codex hook: new messages, then sessions sharing this worktree."""
     session_id = payload.get("session_id") or payload.get("thread_id")
-    if not session_id:
+    # Claude subagents share the session id; leave messages for the main thread.
+    if not session_id or payload.get("agent_id"):
         return None
     event = payload.get("hook_event_name") or "UserPromptSubmit"
     if event not in HOOK_EVENTS:
         return None
+    if event == "SessionStart" and payload.get("source") not in ("resume", "compact"):
+        record_start(session_id)
     cwd = payload.get("cwd") or os.getcwd()
     if host is None:
         transcript = payload.get("transcript_path")

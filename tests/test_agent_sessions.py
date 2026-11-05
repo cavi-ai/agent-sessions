@@ -125,8 +125,11 @@ class PartnerTests(Machine):
         self.assertEqual(self.run_tool("hook", "--host", "codex", stdin=payload), "")
         self.assertEqual(json.loads(self.run_tool("--json", "inbox", "--session",
                                                  "codex-sub-0002")), [])
-        messages = json.loads(self.run_tool("--json", "inbox", "--session", "claude-0006"))
-        self.assertEqual([m["pair_id"] for m in messages], [pair["id"]])
+        started = json.dumps({"session_id": "new-claude-0009", "cwd": str(self.worktree),
+                              "hook_event_name": "SessionStart", "source": "startup"})
+        context = json.loads(self.run_tool("hook", "--host", "claude", stdin=started))[
+            "hookSpecificOutput"]["additionalContext"]
+        self.assertIn(pair["id"], context)
 
     def test_bad_pair_metadata_does_not_hide_other_sessions_or_messages(self):
         pair = json.loads(self.run_tool("partner", "claude", str(self.worktree), "Invitation",
@@ -366,6 +369,46 @@ class MessageTests(Machine):
     def test_a_hook_without_a_session_or_with_bad_input_stays_silent(self):
         self.assertEqual(self.run_tool("hook", stdin="{}"), "")
         self.assertEqual(self.run_tool("hook", stdin="not json"), "")
+
+
+class ClaudeHostTests(Machine):
+    def test_a_subagent_hook_leaves_messages_for_the_main_thread(self):
+        self.run_tool("send", "claude-0006", "for the main thread", "--session", "codex-main-0001")
+        payload = {"session_id": "claude-0006", "cwd": str(self.worktree),
+                   "hook_event_name": "PostToolUse"}
+        subagent = json.dumps({**payload, "agent_id": "a1b2c3", "agent_type": "general-purpose"})
+        self.assertEqual(self.run_tool("hook", "--host", "claude", stdin=subagent), "")
+        main = json.loads(self.run_tool("hook", "--host", "claude", stdin=json.dumps(payload)))
+        self.assertIn("for the main thread", main["hookSpecificOutput"]["additionalContext"])
+
+    def test_claude_started_from_a_codex_shell_reads_its_own_inbox(self):
+        self.run_tool("send", "claude-0006", "for claude", "--session", "codex-main-0001")
+        self.run_tool("send", "codex-main-0001", "for codex", "--session", "claude-0006")
+        nested = {**self.env, "CODEX_THREAD_ID": "codex-main-0001",
+                  "CLAUDE_CODE_SESSION_ID": "claude-0006", "CLAUDE_PID": str(os.getpid())}
+        received = json.loads(self.run_tool("--json", "inbox", env=nested))
+        self.assertEqual([m["text"] for m in received], ["for claude"])
+        codex = json.loads(self.run_tool("--json", "inbox", "--keep", "--session",
+                                         "codex-main-0001"))
+        self.assertEqual([m["text"] for m in codex], ["for codex"])
+
+    def test_claude_invitation_skips_sessions_that_were_already_running(self):
+        pair = json.loads(self.run_tool("partner", "claude", str(self.worktree), "New sessions only",
+                                       "--session", "codex-main-0001"))
+        running = {"session_id": "claude-0006", "cwd": str(self.worktree)}
+        for event in ({"hook_event_name": "PostToolUse"},
+                      {"hook_event_name": "SessionStart", "source": "resume"}):
+            with self.subTest(event=event):
+                self.assertNotIn("New sessions only", self.run_tool(
+                    "hook", "--host", "claude", stdin=json.dumps({**running, **event})))
+        self.assertEqual(json.loads(self.run_tool("--json", "inbox", "--session", "claude-0006")),
+                         [])
+        started = json.dumps({"session_id": "new-claude-0009", "cwd": str(self.worktree),
+                              "hook_event_name": "SessionStart", "source": "startup"})
+        context = json.loads(self.run_tool("hook", "--host", "claude", stdin=started))[
+            "hookSpecificOutput"]["additionalContext"]
+        self.assertIn("New sessions only", context)
+        self.assertIn(pair["id"], context)
 
 
 class HookSetupTests(Machine):
