@@ -234,7 +234,7 @@ class PartnerTests(Machine):
 
     def test_queue_failure_preserves_the_invitation_without_claiming_delivery(self):
         self.data.mkdir()
-        (self.data / "paths").write_text("not a directory")
+        (self.data / "queue").write_text("not a directory")
         result = subprocess.run([sys.executable, str(TOOL), "partner", "claude",
                                  str(self.worktree), "Preserve this brief", "--session",
                                  "codex-main-0001"], env=self.env, text=True,
@@ -291,11 +291,10 @@ class MessageTests(Machine):
                 self.assertEqual(path.stat().st_mode & 0o077, 0)
         self.assertEqual(self.data.stat().st_mode & 0o077, 0)
 
-    def test_bad_inbox_line_does_not_hide_other_messages(self):
+    def test_bad_message_file_does_not_hide_other_messages(self):
         self.run_tool("send", "codex-main-0001", "first")
-        inbox = self.data / "inbox" / "codex-main-0001.jsonl"
-        with inbox.open("a") as handle:
-            handle.write("broken json\n")
+        queue = self.data / "queue" / "s-codex-main-0001" / "new"
+        (queue / "0-broken.json").write_text("broken json")
         self.run_tool("send", "codex-main-0001", "second")
         messages = json.loads(self.run_tool("--json", "inbox", "--session", "codex-main-0001"))
         self.assertEqual([m["text"] for m in messages], ["first", "second"])
@@ -304,6 +303,7 @@ class MessageTests(Machine):
         self.run_tool("send", "codex-main-0001", "already delivered")
         self.run_tool("inbox", "--session", "codex-main-0001")
         state = self.data / "state" / "codex-main-0001.json"
+        state.parent.mkdir(exist_ok=True)
         state.write_text("broken json")
         result = subprocess.run([sys.executable, str(TOOL), "inbox", "--session", "codex-main-0001"],
                                 env=self.env, capture_output=True, text=True, timeout=30, check=False)
@@ -409,6 +409,69 @@ class ClaudeHostTests(Machine):
             "hookSpecificOutput"]["additionalContext"]
         self.assertIn("New sessions only", context)
         self.assertIn(pair["id"], context)
+
+
+class ClaimTests(Machine):
+    def path_message(self, text):
+        sent = json.loads(self.run_tool("--json", "send", str(self.worktree), text,
+                                        "--session", "codex-main-0001"))
+        return sent["message"]["id"]
+
+    def hook(self, session, event="PostToolUse", host="codex"):
+        out = self.run_tool("hook", "--host", host, stdin=json.dumps(
+            {"session_id": session, "cwd": str(self.worktree), "hook_event_name": event}))
+        return json.loads(out)["hookSpecificOutput"]["additionalContext"] if out else ""
+
+    def claim(self, message_id, session, *text):
+        return subprocess.run([sys.executable, str(TOOL), "--json", "claim", message_id, *text,
+                               "--session", session], env=self.env, text=True,
+                              capture_output=True, timeout=30, check=False)
+
+    def test_claiming_a_path_message_removes_it_and_tells_the_sender_ready(self):
+        message = self.path_message("Take the parser task")
+        self.assertIn(message, self.hook("claude-0006"))
+        claimed = self.claim(message, "claude-0006")
+        self.assertEqual(claimed.returncode, 0, claimed.stderr)
+        self.assertEqual(self.hook("later-session-0010"), "")
+        replies = json.loads(self.run_tool("--json", "inbox", "--session", "codex-main-0001"))
+        self.assertEqual([(m["text"], m["re"], m["from_id"]) for m in replies],
+                         [("ready", message, "claude-0006")])
+
+    def test_only_one_session_can_claim_a_message(self):
+        message = self.path_message("One owner only")
+        self.hook("claude-0006")
+        self.hook("codex-sub-0002")
+        first = self.claim(message, "codex-sub-0002", "ready, taking it")
+        second = self.claim(message, "claude-0006")
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertNotEqual(second.returncode, 0)
+        self.assertIn("already claimed by codex-sub-0002", second.stderr)
+        replies = json.loads(self.run_tool("--json", "inbox", "--session", "codex-main-0001"))
+        self.assertEqual([m["text"] for m in replies], ["ready, taking it"])
+
+    def test_status_shows_who_received_and_who_claimed_a_message(self):
+        message = self.path_message("Who has it")
+        self.assertEqual(json.loads(self.run_tool("--json", "status", message))["state"],
+                         "pending")
+        self.hook("claude-0006")
+        self.hook("codex-sub-0002")
+        received = json.loads(self.run_tool("--json", "status", message))
+        self.assertEqual((received["state"], received["received_by"]),
+                         ("received", ["claude-0006", "codex-sub-0002"]))
+        self.claim(message, "claude-0006")
+        claimed = json.loads(self.run_tool("--json", "status", message))
+        self.assertEqual((claimed["state"], claimed["claimed_by"]), ("claimed", "claude-0006"))
+
+    def test_partner_connect_claims_the_invitation_and_reports_ready(self):
+        pair = json.loads(self.run_tool("partner", "claude", str(self.worktree), "Partner brief",
+                                       "--session", "codex-main-0001"))
+        self.assertIn("Partner brief", self.hook("claude-0006", "SessionStart", "claude"))
+        recipient = {**self.env, "CLAUDE_CODE_SESSION_ID": "claude-0006"}
+        self.run_tool("partner", "connect", pair["id"], env=recipient)
+        self.assertNotIn("Partner brief", self.hook("new-claude-0011", "SessionStart", "claude"))
+        replies = json.loads(self.run_tool("--json", "inbox", "--session", "codex-main-0001"))
+        self.assertEqual([(m["from_id"], m["text"].split(":")[0]) for m in replies],
+                         [("claude-0006", "ready")])
 
 
 class HookSetupTests(Machine):

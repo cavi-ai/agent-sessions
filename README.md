@@ -24,8 +24,10 @@ Alternatively, run `python3 /path/to/agent-sessions/agent_sessions.py` directly.
 agent-sessions list                 # recently active sessions, newest first
 agent-sessions who [PATH]           # sessions in PATH's repository, any worktree
 agent-sessions send TO 'text'       # TO: a session id (6+ characters) or a directory
-agent-sessions inbox [--session ID] # consumes unread messages for a session
-agent-sessions inbox --keep         # preview without consuming
+agent-sessions inbox [--session ID] # receives new messages for a session
+agent-sessions inbox --keep         # preview without marking them received
+agent-sessions claim ID ['reply']   # take a message out of the queue; replies 'ready'
+agent-sessions status ID            # pending, received (by whom) or claimed
 ```
 
 `--minutes N` sets the activity window (default 30). `--json` prints
@@ -46,7 +48,15 @@ records, not process liveness. Coordinate before editing shared files.
 
 Send to a session ID for one recipient. A message sent to a directory reaches
 each session under that directory, **including sessions that start there later**,
-excluding the sender. Path messages persist until their inbox file is removed.
+excluding the sender, until one of them claims it.
+
+Each message has three states. **Pending**: queued, not yet seen. **Received**: a
+hook or `inbox` showed it to a session; each session receives it once. **Claimed**:
+an agent ran `claim ID`, which removes it from the queue, so no other or later
+session receives it, and sends the sender a reply (`ready` unless another text is
+given) that references the message. Exactly one session can claim a message;
+later attempts report who holds it. Replies need no claim: receiving one removes it.
+`status ID` reports the state and which sessions received or claimed it.
 
 ## Enable delivery in both hosts
 
@@ -90,13 +100,13 @@ the transcript path or matching native session environment variable. If the
 host is unknown, ordinary messages still work and partner invitations wait.
 
 Sending queues a message; it does not interrupt an agent or start an idle turn.
-Delivery records prevent repeat reads, including after more than 500 messages.
-They record consumption by this tool, not acknowledgment by the host or model.
-A crash after recording consumption can lose the corresponding hook output.
+Receipts record delivery by this tool, not acknowledgment by the host or model;
+a claim is the agent's acknowledgment. A crash after recording a receipt can lose
+the corresponding hook output; the message stays claimable.
 
 For a manual round trip, have Codex send to the Claude session ID, let Claude's
-next hook or `inbox` read it, then reply to the message's `from_id`. Codex's next
-hook or `inbox` reads the reply. Both hosts must use the same message directory.
+next hook or `inbox` read it, then `claim` it with a reply. Codex's next hook or
+`inbox` reads the reply. Both hosts must use the same message directory.
 
 ## Partner sessions
 
@@ -121,7 +131,8 @@ directory after the pair is created reads the brief through its hook or inbox an
 runs the included `partner connect PAIR_ID` command, which uses its native session
 identity. A start is a `SessionStart` hook with any source except `resume` and
 `compact`; sessions already running there do not receive the brief. The first valid
-connection claims the invitation; later sessions no longer receive it.
+connection claims the invitation, removes it from the queue and replies `ready` to the
+caller; later sessions no longer receive it. Plain `claim` refuses invitations.
 If queueing fails, the saved record remains `needs_delivery` with its invitation.
 Inspect it with `partner show` and resolve the storage error before trying again;
 do not assume that a failed append left no message behind.
@@ -180,12 +191,20 @@ Missing hosts are allowed; unreadable Codex databases report a diagnostic.
 Claude sessions are marked active by recent transcript modification, not a
 running/idle signal.
 
-Messages, pair records and consumption records live in `$AGENT_SESSIONS_DATA`, defaulting to
+Message queues, receipts, claimed messages and pair records live in `$AGENT_SESSIONS_DATA`, defaulting to
 `~/.local/share/agent-sessions`. Keep this directory outside the checkout and
 configure the same value in both hosts. New files are owner-only, plaintext and
 retained until removed. Discovery output includes session titles and local
 paths; do not publish it. This tool makes no network requests or account logins,
 but hook context is passed to the receiving host and model.
+
+Each message is one file under `queue/<key>/`, where the key names a session or a
+directory. It moves by atomic rename from `new/` to `cur/` when its session receives
+it and to `claimed/` when claimed, so readers and claimers need no lock. Directory
+messages stay in `new/` with one receipt file per session under `receipts/<id>/`.
+A hook lists only the queues of the session and of each directory above its working
+directory, so its cost does not grow with message history. Inboxes from the earlier
+JSONL format are moved into the queue on first use, with their delivery records.
 See [security and privacy](SECURITY.md) for trust boundaries and retention.
 
 ## Development
