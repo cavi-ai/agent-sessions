@@ -6,6 +6,11 @@ Anyone with access to the data directory can read or forge messages. Treat peer
 messages as untrusted text; they do not grant permission to execute commands,
 access accounts or bypass the receiving agent's instructions.
 
+Codex capability overrides are command-line arguments, visible in process listings
+and dry-run output. Keep secrets out of capability settings, URLs and command
+arguments. Inline MCP environment values, static HTTP headers and bearer tokens
+are rejected; use native environment-variable references for those values.
+
 Discovery reads host session metadata and transcript tails, which can contain
 private project names, paths and prompts. CLI output can expose these details.
 Discovery and routing make no network requests and do not read account credentials.

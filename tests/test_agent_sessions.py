@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import sqlite3
@@ -412,6 +413,38 @@ class ClaudeHostTests(Machine):
 
 
 class ClaimTests(Machine):
+    def test_legacy_migration_waits_for_delivery_state_repair_without_replay(self):
+        for kind in ("inbox", "paths"):
+            with self.subTest(kind=kind):
+                data = self.root / ("migration-" + kind)
+                folder = data / kind
+                folder.mkdir(parents=True)
+                state = data / "state" / "claude-0006.json"
+                state.parent.mkdir()
+                original = json.dumps({"delivered": ["old-seen"], "warned": []})
+                state.write_text("broken json")
+                name = ("claude-0006" if kind == "inbox" else
+                        hashlib.sha256(str(self.worktree).encode()).hexdigest()[:16])
+                legacy = folder / (name + ".jsonl")
+                routing = ({"to": "claude-0006"} if kind == "inbox" else
+                           {"path": str(self.worktree)})
+                messages = [{"id": mid, "text": mid, "from": "peer", "from_id": "peer-0010",
+                             "at": "2026-01-01T00:00:00Z", **routing}
+                            for mid in ("old-seen", "still-pending")]
+                legacy.write_text("".join(json.dumps(m) + "\n" for m in messages))
+                env = {**self.env, "AGENT_SESSIONS_DATA": str(data)}
+                result = subprocess.run([sys.executable, str(TOOL), "--json", "inbox",
+                                         "--session", "claude-0006"], env=env, text=True,
+                                        capture_output=True, check=False, timeout=30)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(result.stdout, "")
+                self.assertTrue(legacy.exists(), "failed migration must preserve the legacy inbox")
+                self.assertFalse((data / "queue").exists(), "validate state before publishing")
+                state.write_text(original)
+                received = json.loads(self.run_tool("--json", "inbox", "--session", "claude-0006",
+                                                    env=env))
+                self.assertEqual([m["id"] for m in received], ["still-pending"])
+
     def path_message(self, text):
         sent = json.loads(self.run_tool("--json", "send", str(self.worktree), text,
                                         "--session", "codex-main-0001"))

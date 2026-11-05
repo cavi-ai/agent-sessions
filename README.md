@@ -9,6 +9,12 @@ to read TOML configuration. Windows is not supported because message storage use
 
 ## Install
 
+Install directly from GitHub:
+
+```sh
+python3 -m pip install git+https://github.com/cavi-ai/agent-sessions.git
+```
+
 From a checkout:
 
 ```sh
@@ -102,6 +108,8 @@ the transcript path or matching native session environment variable. If the
 host is unknown, ordinary messages still work and partner invitations wait.
 
 Sending queues a message; it does not interrupt an agent or start an idle turn.
+Automatic delivery depends on the host invoking its hooks. For a turn that must
+read queued context before doing other work, run `agent-sessions inbox` first.
 Receipts record delivery by this tool, not acknowledgment by the host or model;
 a claim is the agent's acknowledgment. A crash after recording a receipt can lose
 the corresponding hook output; the message stays claimable.
@@ -204,6 +212,11 @@ project configuration from the worker directory and repeats pinned app, feature,
 MCP, plugin and skill settings as native `-c` overrides on start and resume.
 Other settings retain their native configuration behavior. Both start and resume carry
 the same profile marker. `--dry-run` shows the command without starting it.
+Capability overrides are visible in process arguments and dry-run output. Keep
+secret values out of them. Nonempty MCP `env`, `http_headers` and `bearer_token`
+values are rejected; use native `env_vars`, `env_http_headers` or
+`bearer_token_env_var` references instead. Values referenced from the environment
+are not expanded into the launch command.
 
 Profiled partners return a guarded launch command rather than an unrestricted
 desktop creation request. Run it once, then connect the returned native session
@@ -263,6 +276,8 @@ messages stay in `new/` with one receipt file per session under `receipts/<id>/`
 A hook lists only the queues of the session and of each directory above its working
 directory, so its cost does not grow with message history. Inboxes from the earlier
 JSONL format are moved into the queue on first use, with their delivery records.
+Migration stops before changing the queue if a delivery-state file is unreadable.
+Repair that state from its authoritative source before retrying migration.
 See [security and privacy](SECURITY.md) for trust boundaries and retention.
 
 ## Development

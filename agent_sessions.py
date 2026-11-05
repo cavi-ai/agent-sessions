@@ -879,11 +879,10 @@ def migrate_legacy():
             return
         delivered = {}
         for state in (root / "state").glob("*.json"):
-            try:
-                ids = json.loads(state.read_text(encoding="utf-8")).get("delivered", [])
-            except (OSError, ValueError, AttributeError):
-                continue
-            for message_id in ids if isinstance(ids, list) else []:
+            # Validate every receipt source before publishing or moving any legacy data.
+            # Skipping damaged state would turn previously received messages into new work.
+            ids = load_state(state.stem).get("delivered", [])
+            for message_id in ids:
                 delivered.setdefault(message_id, set()).add(state.stem)
         for path in sorted((root / "inbox").glob("*.jsonl")):
             if not MESSAGE_ID.fullmatch(path.stem):

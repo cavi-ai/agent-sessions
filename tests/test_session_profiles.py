@@ -13,6 +13,38 @@ import agent_sessions
 
 
 class ProfileTests(Machine):
+    def test_inline_mcp_credentials_are_rejected_without_echoing_their_values(self):
+        _, config = self.profile()
+        secret = 'synthetic-private-value-for-test'
+        for setting in ('env = { API_KEY = "'+secret+'" }',
+                        'http_headers = { Authorization = "'+secret+'" }',
+                        'bearer_token = "'+secret+'"'):
+            with self.subTest(setting=setting.split('=')[0]):
+                config.write_text('[mcp_servers.fixture]\ncommand = "fixture"\n'+setting+'\n')
+                profile = json.loads(self.run_tool('profile', 'create', 'codex',
+                                                   str(self.worktree), 'private'))
+                result = subprocess.run([sys.executable, str(TOOL), 'profile', 'launch',
+                                         profile['id'], '--dry-run'], env=self.env, text=True,
+                                        capture_output=True, check=False, timeout=30)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(result.stdout, '')
+                self.assertNotIn(secret, result.stderr)
+                self.assertIn('environment', result.stderr.lower())
+
+    def test_mcp_environment_references_preserve_names_without_expanding_secrets(self):
+        _, config = self.profile()
+        config.write_text('[mcp_servers.fixture]\ncommand = "fixture"\n'
+                          'env_vars = ["TEST_NATIVE_TOKEN"]\n'
+                          'bearer_token_env_var = "TEST_NATIVE_TOKEN"\n'
+                          'env_http_headers = { "X-Auth" = "TEST_NATIVE_TOKEN" }\n')
+        profile = json.loads(self.run_tool('profile', 'create', 'codex',
+                                           str(self.worktree), 'environment'))
+        secret = 'synthetic-private-value-for-test'
+        output = self.run_tool('profile', 'launch', profile['id'], '--dry-run',
+                               env={**self.env, 'TEST_NATIVE_TOKEN': secret})
+        self.assertIn('TEST_NATIVE_TOKEN', output)
+        self.assertNotIn(secret, output)
+
     def test_existing_worker_can_be_attached_without_creating_another_session(self):
         pair=json.loads(self.run_tool('partner','attach','codex-sub-0002',
                                       '--session','codex-main-0001'))
