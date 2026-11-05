@@ -220,7 +220,7 @@ def execute(pair, receipt, persist, timeout, filename):
         if session_id:
             guard()
             latest = latest_turn(client, session_id, deadline)
-            if ((latest or {}).get('id') != receipt['turn_id'] or
+            if ((latest or {}).get('id') != receipt['expected_turn_id'] or
                     latest and latest.get('status') not in ('completed', 'failed', 'interrupted')):
                 raise Attention('latest native turn changed or is active')
             method, params = 'thread/resume', {'threadId': session_id, 'excludeTurns': True}
@@ -252,7 +252,7 @@ def execute(pair, receipt, persist, timeout, filename):
         receipt['capabilities']['mcp_tools'] = discovered_tools(client, native_id, expected, deadline)
         guard()
         latest = latest_turn(client, native_id, deadline)
-        if ((latest or {}).get('id') != receipt['turn_id'] or
+        if ((latest or {}).get('id') != receipt['expected_turn_id'] or
                 latest and latest.get('status') not in ('completed', 'failed', 'interrupted')):
             raise Attention('native turn changed or became active before assignment')
         persist('submitting', 'unknown')
@@ -304,7 +304,8 @@ def run(pair_id, timeout=60, prompt_file=None):
     pair = storage.read_pair(pair_id)
     previous = pair.get('last_run', {})
     receipt = {'pair_id': pair_id, 'session_id': pair['partner']['id'],
-        'profile_id': pair.get('profile'), 'turn_id': previous.get('turn_id'),
+        'profile_id': pair.get('profile'), 'turn_id': None,
+        'expected_turn_id': previous.get('turn_id') or previous.get('expected_turn_id'),
         'status': 'attention', 'output_text': '', 'prompt_sha256': None,
         'capabilities': {'mcp_tools': {}, 'automatic_skill_context': False}}
     if previous.get('status') in ('unknown', 'failed'):

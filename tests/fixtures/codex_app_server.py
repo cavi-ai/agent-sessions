@@ -64,6 +64,8 @@ for line in sys.stdin:
         turn = {'id': 'turn-'+str(number), 'status': 'inProgress', 'items': []}
         state['turns'] = [turn]
         save()
+        if state.get('lose_turn_response'):
+            sys.exit(0)
         send({'id': request['id'], 'result': {'turn': turn}})
         if state.get('approval'):
             send({'id': 'approval-1', 'method': 'item/commandExecution/requestApproval',

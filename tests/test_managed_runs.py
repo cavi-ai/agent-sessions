@@ -221,3 +221,13 @@ enabled_tools = ["inspect"]
         self.assertLess(time.monotonic()-started, 4)
         self.assertEqual(receipt['status'], 'unknown')
         self.assertIsNotNone(receipt['session_id'])
+
+    def test_unknown_later_turn_does_not_report_the_previous_turn_as_its_identity(self):
+        first = self.run_pair()
+        self.native(lose_turn_response=True)
+        second = self.run_pair()
+        self.assertEqual(second['status'], 'unknown')
+        self.assertEqual(second['session_id'], first['session_id'])
+        self.assertIsNone(second['turn_id'])
+        self.assertEqual(self.run_pair(), second)
+        self.assertEqual(self.methods().count('turn/start'), 2)
