@@ -88,6 +88,69 @@ class ProfileTests(Machine):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('regular', result.stderr.lower())
 
+    def test_codex_launch_repeats_pinned_capability_settings_as_native_overrides(self):
+        _, config = self.profile()
+        config.write_text('[features]\napps = false\nplugins = false\n'
+                          '[skills]\nbundled = {enabled = false}\n'
+                          'config = [{name = "painter", enabled = false}]\n'
+                          '[mcp_servers.fixture]\ncommand = "fixture"\n'
+                          'enabled_tools = ["inspect"]\n')
+        import session_profiles
+        profile = session_profiles.capture('codex', self.worktree, 'scoped')
+        for session in (None, 'codex-sub-0002'):
+            command = session_profiles.argv(profile, session)
+            overrides = [command[i+1] for i, value in enumerate(command) if value == '-c']
+            self.assertEqual({value.split('=', 1)[0] for value in overrides},
+                             {'features', 'skills', 'mcp_servers'})
+            self.assertIn('"inspect"', next(v for v in overrides if v.startswith('mcp_servers=')))
+            self.assertNotIn('--model', command)
+            if session:
+                self.assertEqual(command[-2:], ['resume', session])
+
+    def test_invalid_codex_toml_is_rejected_before_launch(self):
+        _, config = self.profile()
+        config.write_text('[broken')
+        import session_profiles
+        profile = session_profiles.capture('codex', self.worktree, 'invalid')
+        with self.assertRaisesRegex(session_profiles.ProfileError, 'TOML'):
+            session_profiles.argv(profile)
+
+    def test_codex_overrides_round_trip_only_capability_values(self):
+        _, config = self.profile()
+        config.write_text('''model = "configured-model"
+approval_policy = "on-request"
+sandbox_mode = "read-only"
+[apps._default]
+enabled = false
+[features]
+apps = false
+plugins = false
+[mcp_servers."fixture.with.dots"]
+command = "fixture"
+args = ["quoted \\"value\\"", "line\\nnext", 'C:\\tools\\fixture', "雪"]
+enabled_tools = ["inspect"]
+startup_timeout_sec = 12.5
+[plugins."fixture@catalog"]
+enabled = true
+[skills]
+bundled = {enabled = false}
+config = [{name = "painter", enabled = false}]
+''')
+        import session_profiles
+        expected = session_profiles.tomllib.loads(config.read_text())
+        capabilities = {key: expected[key] for key in
+                        ('apps', 'features', 'mcp_servers', 'plugins', 'skills')}
+        profile = session_profiles.capture('codex', self.worktree, 'roundtrip')
+        for session in (None, 'codex-sub-0002'):
+            with self.subTest(session=session):
+                command = session_profiles.argv(profile, session)
+                overrides = [command[i+1] for i, value in enumerate(command) if value == '-c']
+                self.assertEqual(session_profiles.tomllib.loads('\n'.join(overrides)), capabilities)
+                self.assertNotIn('model', capabilities)
+                self.assertNotIn('--model', command)
+                self.assertNotIn('--ask-for-approval', command)
+                self.assertNotIn('--sandbox', command)
+
     def test_profiled_partner_requires_guarded_launch_instead_of_broad_native_creation(self):
         profile, _ = self.profile()
         pair = json.loads(self.run_tool('partner', 'codex', str(self.worktree), 'Check a.txt',
@@ -181,7 +244,8 @@ class ProfileTests(Machine):
         self.run_tool('partner', 'connect', pair['id'], 'codex-sub-0002', '--session', 'codex-main-0001')
         launch = json.loads(self.run_tool('partner', 'resume', pair['id'], '--dry-run',
                                          '--session', 'codex-main-0001'))
-        self.assertEqual(launch['argv'], ['codex', 'resume', 'codex-sub-0002'])
+        self.assertEqual(launch['argv'], ['codex', '-c',
+            'features={"apps" = false, "plugins" = false}', 'resume', 'codex-sub-0002'])
         self.assertEqual(launch['environment']['AGENT_SESSIONS_PROFILE_ID'], profile['id'])
 
     def test_binding_write_failure_cannot_make_the_profile_hook_fail_open(self):
