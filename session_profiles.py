@@ -184,6 +184,14 @@ def codex_overrides(profile):
         if len(raw) > LIMIT or hashlib.sha256(raw).hexdigest() != expected['sha256']:
             raise ProfileError('profile configuration changed before launch')
         config = tomllib.loads(raw.decode('utf-8'))
+        servers = config.get('mcp_servers', {})
+        if not isinstance(servers, dict) or any(not isinstance(v, dict) for v in servers.values()):
+            raise ProfileError('MCP settings must contain server tables')
+        if any(server.get(key) for server in servers.values()
+               for key in ('env', 'http_headers', 'bearer_token')):
+            raise ProfileError('MCP inline values cannot be exposed in command arguments; use '
+                               'environment references: env_vars, env_http_headers or '
+                               'bearer_token_env_var')
         result = [key+'='+_toml(config[key])
                   for key in ('apps', 'features', 'mcp_servers', 'plugins', 'skills')
                   if key in config]

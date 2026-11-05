@@ -8,6 +8,8 @@ description: Use before changing a repository that another Claude or Codex sessi
 From a source checkout, run `python3 <this folder>/agent_sessions.py`. With the
 Python package installed, use `agent-sessions` for the same commands.
 
+- At the start of a coordinated turn, run `agent-sessions inbox` before other work.
+  Automatic delivery depends on the host invoking its hooks.
 - Before editing a repository, run `agent-sessions who <repo path>`. If another session is marked `SAME WORKTREE`, or is changing the files you are about to change, coordinate file ownership before editing. Reuse the current checkout unless instructed otherwise.
 - To list everything active: `agent-sessions list`.
 - To message a session: `agent-sessions send <session id or path> '<text>'`. The message reaches that session the next time its hook runs or its agent runs `inbox`.
