@@ -16,7 +16,7 @@ agent_sessions.py hook < payload.json  # hook entry point for Claude Code and Co
 
 `who` marks a session `SAME WORKTREE` when it works in the same checkout as PATH. It also lists that session's uncommitted or recently edited files that PATH has uncommitted too.
 
-A message sent to a path goes to every active session whose working directory is inside that path. Sending never interrupts a session: the message waits until that session's hook runs or its agent runs `inbox`.
+A message sent to a path reaches every session working under that path, including sessions that start there later. Sending never interrupts a session: the message waits until that session's hook runs or its agent runs `inbox`.
 
 ## Sources
 

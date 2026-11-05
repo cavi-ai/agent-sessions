@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -283,10 +284,15 @@ def describe(session):
             f"{ago(session['updated'])} ago{parent}: {session['title'] or '(untitled)'} -- {place}")
 
 
-# Message board: one append-only inbox per recipient, one delivery record per session.
+# Message board: an append-only inbox per session id and per path, one delivery record per
+# session. A path inbox reaches every session working under that path, including later ones.
 
 def inbox_path(session_id):
     return data_dir() / "inbox" / f"{session_id}.jsonl"
+
+
+def path_inbox(root):
+    return data_dir() / "paths" / f"{hashlib.sha256(root.encode()).hexdigest()[:16]}.jsonl"
 
 
 def state_path(session_id):
@@ -317,45 +323,57 @@ def save_state(session_id, state):
     os.replace(name, path)
 
 
-def recipients(to, found, sender=None):
-    candidates = [s for s in found if s["id"] != sender]
-    by_id = [s for s in candidates if s["id"] == to or (len(to) >= 6 and s["id"].startswith(to))]
-    if len(by_id) == 1:
-        return by_id
-    if len(by_id) > 1:
-        raise SystemExit(f"agent-sessions: {to} matches {len(by_id)} sessions; give more of the id")
-    if Path(to).expanduser().exists():
-        root = resolved(to)
-        return [s for s in candidates if inside(resolved(s["cwd"]), root)]
-    raise SystemExit(f"agent-sessions: no active session or path matches {to}")
+def append(path, record):
+    with locked(path), open(path, "a") as handle:
+        handle.write(json.dumps(record) + "\n")
+
+
+def read_inbox(path):
+    try:
+        return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+    except (OSError, ValueError):
+        return []
 
 
 def send(to, text, found, sender=None, sender_name=None):
-    targets = recipients(to, found, sender)
-    if not targets:
-        raise SystemExit(f"agent-sessions: no active session works in {to}")
+    """Leave text for one session id, or for every session working under a path.
+
+    Returns the message and the active sessions it addresses now; a path message also waits
+    for sessions that start under that path later."""
     message = {"id": uuid.uuid4().hex, "from": sender_name or sender or "unknown", "text": text,
-               "at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
-    for target in targets:
-        path = inbox_path(target["id"])
-        with locked(path), open(path, "a") as handle:
-            handle.write(json.dumps({**message, "to": target["id"]}) + "\n")
-    return message, targets
+               "from_id": sender, "at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
+    candidates = [s for s in found if s["id"] != sender]
+    by_id = [s for s in candidates if s["id"] == to or (len(to) >= 6 and s["id"].startswith(to))]
+    if len(by_id) > 1:
+        raise SystemExit(f"agent-sessions: {to} matches {len(by_id)} sessions; give more of the id")
+    if by_id:
+        append(inbox_path(by_id[0]["id"]), {**message, "to": by_id[0]["id"]})
+        return message, by_id
+    if not Path(to).expanduser().is_dir():
+        raise SystemExit(f"agent-sessions: no active session or directory matches {to}")
+    root = resolved(to)
+    append(path_inbox(root), {**message, "path": root})
+    return message, [s for s in candidates if inside(resolved(s["cwd"]), root)]
 
 
-def unread(session_id, mark=True):
-    path = inbox_path(session_id)
-    if not path.exists():
+def unread(session_id, cwd=None, mark=True):
+    """Undelivered messages for a session: its own inbox, then inboxes of paths holding cwd."""
+    messages = read_inbox(inbox_path(session_id))
+    if cwd:
+        here = resolved(cwd)
+        for path in sorted((data_dir() / "paths").glob("*.jsonl")):
+            messages += [m for m in read_inbox(path)
+                         if inside(here, m.get("path", "")) and m.get("from_id") != session_id]
+    if not messages:
         return []
     with locked(state_path(session_id)):
         state = load_state(session_id)
         seen = set(state["delivered"])
-        messages = [m for m in (json.loads(line) for line in path.read_text().splitlines() if line)
-                    if m["id"] not in seen]
-        if mark and messages:
-            state["delivered"] += [m["id"] for m in messages]
+        fresh = [m for m in messages if m["id"] not in seen]
+        if mark and fresh:
+            state["delivered"] += [m["id"] for m in fresh]
             save_state(session_id, state)
-    return messages
+    return fresh
 
 
 def self_id(cwd, found):
@@ -373,10 +391,11 @@ def hook(payload, minutes=ACTIVE_MINUTES):
     if not session_id:
         return None
     event = payload.get("hook_event_name") or "UserPromptSubmit"
+    cwd = payload.get("cwd") or os.getcwd()
     lines = [f"Message from {m['from']} at {m['at']} (another agent session): {m['text']}"
-             for m in unread(session_id)]
+             for m in unread(session_id, cwd)]
     if event in ("SessionStart", "UserPromptSubmit"):
-        here = git_state(payload.get("cwd") or os.getcwd())
+        here = git_state(cwd)
         if here.get("root"):
             with locked(state_path(session_id)):
                 state = load_state(session_id)
@@ -447,10 +466,14 @@ def main(argv=None):
         name = f"{f'session {sender[:8]}' if sender else 'an agent'} in {home(os.getcwd())}"
         message, targets = send(args.to, args.text, found, sender, name)
         result = {"message": message, "to": [t["id"] for t in targets]}
-        text = [f"Left message {message['id'][:8]} for:"] + [f"- {describe(t)}" for t in targets]
+        waiting = (f" and any session that starts under {home(resolved(args.to))}"
+                   if Path(args.to).expanduser().is_dir() else "")
+        text = [f"Left message {message['id'][:8]} for {len(targets)} active session(s){waiting}:"]
+        text += [f"- {describe(t)}" for t in targets]
     else:
         session_id = args.session or self_id(os.getcwd(), found)
-        result = unread(session_id, mark=not args.keep)
+        cwd = next((s["cwd"] for s in found if s["id"] == session_id), os.getcwd())
+        result = unread(session_id, cwd, mark=not args.keep)
         text = [f"{m['at']} {m['from']}: {m['text']}" for m in result] or ["No unread messages."]
     print(json.dumps(result, indent=2) if args.json else "\n".join(text))
     return 0

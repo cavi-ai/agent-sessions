@@ -132,6 +132,23 @@ class MessageTests(Machine):
         self.assertEqual([m["text"] for m in unread], ["Use your own worktree"])
         self.assertEqual(json.loads(self.run_tool("--json", "inbox", "--session", "claude-0006")), [])
 
+    def test_a_path_message_waits_for_a_session_that_starts_there_later(self):
+        empty = self.root / "empty"
+        empty.mkdir()
+        sent = json.loads(self.run_tool("--json", "send", str(empty), "Set up your end",
+                                        "--session", "claude-0006"))
+        self.assertEqual(sent["to"], [])
+
+        def hook(session, cwd):
+            out = self.run_tool("hook", stdin=json.dumps(
+                {"session_id": session, "cwd": str(cwd), "hook_event_name": "PostToolUse"}))
+            return json.loads(out)["hookSpecificOutput"]["additionalContext"] if out else ""
+
+        self.assertIn("Set up your end", hook("new-partner-0007", empty / "src"))
+        self.assertEqual(hook("new-partner-0007", empty / "src"), "")
+        self.assertEqual(hook("elsewhere-0008", self.repo), "")
+        self.assertEqual(hook("claude-0006", empty), "")
+
     def test_a_hook_without_a_session_or_with_bad_input_stays_silent(self):
         self.assertEqual(self.run_tool("hook", stdin="{}"), "")
         self.assertEqual(self.run_tool("hook", stdin="not json"), "")
