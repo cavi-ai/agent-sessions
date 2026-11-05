@@ -107,7 +107,7 @@ def codex_rollout(path):
     return status, unique_last(edited)
 
 
-def codex_sessions(since, include_reviews=False):
+def codex_sessions(since, include_reviews=False, within=None):
     db = codex_db()
     if db is None:
         return []
@@ -128,6 +128,8 @@ def codex_sessions(since, include_reviews=False):
         return []
     sessions = []
     for thread, rollout, updated_ms, cwd, title, source, nickname in rows:
+        if within and not inside(resolved(cwd), within):
+            continue
         parent = role = None
         try:
             origin = json.loads(source)
@@ -150,7 +152,7 @@ def codex_sessions(since, include_reviews=False):
     return sessions
 
 
-def claude_sessions(since):
+def claude_sessions(since, within=None):
     sessions = []
     for path in (claude_home() / "projects").glob("*/*.jsonl"):
         try:
@@ -175,7 +177,7 @@ def claude_sessions(since):
                     target = arguments.get("file_path") or arguments.get("notebook_path")
                     if target:
                         edited.append(target)
-        if not cwd:
+        if not cwd or (within and not inside(resolved(cwd), within)):
             continue
         sessions.append({"host": "claude", "id": path.stem,
                          "title": (title or "").strip().splitlines()[0][:80] if title else "",
@@ -216,9 +218,10 @@ def git_state(cwd, cache=None):
     return state
 
 
-def sessions(minutes=ACTIVE_MINUTES, include_reviews=False):
+def sessions(minutes=ACTIVE_MINUTES, include_reviews=False, within=None):
+    """Active sessions, newest first; within limits them to working directories under a path."""
     since = time.time() - minutes * 60
-    found = codex_sessions(since, include_reviews) + claude_sessions(since)
+    found = codex_sessions(since, include_reviews, within) + claude_sessions(since, within)
     cache = {}
     for session in found:
         session["git"] = git_state(session["cwd"], cache)
@@ -377,7 +380,7 @@ def hook(payload, minutes=ACTIVE_MINUTES):
         if here.get("root"):
             with locked(state_path(session_id)):
                 state = load_state(session_id)
-                peers = [s for s in sessions(minutes) if s["id"] != session_id
+                peers = [s for s in sessions(minutes, within=here["root"]) if s["id"] != session_id
                          and (s.get("git") or {}).get("root") == here["root"]
                          and s["id"] not in state["warned"]]
                 if peers:
@@ -386,7 +389,8 @@ def hook(payload, minutes=ACTIVE_MINUTES):
             if peers:
                 lines.append("Other agent sessions are working in this checkout:")
                 lines += [f"- {describe(s)}" for s in peers]
-                lines.append("Coordinate before editing: agent-sessions send <id> '<message>'.")
+                lines.append(f"Coordinate before editing: python3 {Path(__file__).resolve()} "
+                             "send <id> '<message>'.")
     if not lines:
         return None
     return {"hookSpecificOutput": {"hookEventName": event, "additionalContext": "\n".join(lines)}}
