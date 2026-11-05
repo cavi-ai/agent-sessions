@@ -83,3 +83,6 @@ for line in sys.stdin:
     send({'id': request['id'], 'result': result})
     if method == 'thread/turns/list' and state.get('stall_before_turn'):
         time.sleep(5)
+
+state['transport_closed'] = True
+save()

@@ -3,6 +3,7 @@
 import hashlib
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -231,3 +232,51 @@ enabled_tools = ["inspect"]
         self.assertIsNone(second['turn_id'])
         self.assertEqual(self.run_pair(), second)
         self.assertEqual(self.methods().count('turn/start'), 2)
+
+    def cancelled_run(self, signum):
+        self.native(timeout=True)
+        process = subprocess.Popen([sys.executable, str(TOOL), 'partner', 'run',
+                                    self.pair['id'], '--timeout', '10'],
+                                   env=self.env, stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE, text=True)
+        try:
+            deadline = time.monotonic()+5
+            receipt_path = self.data/'pairs'/(self.pair['id']+'.json')
+            while time.monotonic() < deadline:
+                saved = json.loads(receipt_path.read_text()).get('last_run', {})
+                if saved.get('phase') == 'running':
+                    break
+                if process.poll() is not None:
+                    self.fail('managed CLI exited before its owned turn was active')
+                time.sleep(0.01)
+            else:
+                self.fail('managed CLI did not record its owned active turn')
+            process.send_signal(signum)
+            output, error = process.communicate(timeout=5)
+            self.assertTrue(output.strip(), error)
+            receipt = json.loads(output)
+            self.assertEqual(process.returncode, 1)
+            self.assertEqual(receipt['status'], 'unknown')
+            self.assertEqual(self.native()['interrupted'],
+                {'threadId': receipt['session_id'], 'turnId': receipt['turn_id']})
+            self.assertEqual(self.methods().count('turn/interrupt'), 1)
+            self.assertTrue(self.native()['transport_closed'])
+            self.assertEqual(self.run_pair(), receipt)
+            self.assertEqual(self.methods().count('turn/start'), 1)
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.communicate(timeout=5)
+
+    def test_sigterm_interrupts_only_the_owned_turn_and_closes_the_transport(self):
+        self.cancelled_run(signal.SIGTERM)
+
+    def test_sigint_interrupts_only_the_owned_turn_and_closes_the_transport(self):
+        self.cancelled_run(signal.SIGINT)
+
+    def test_signal_handlers_are_restored_after_a_rejected_run(self):
+        import managed_runs
+        previous = {s: signal.getsignal(s) for s in (signal.SIGTERM, signal.SIGINT)}
+        with self.assertRaises(ValueError):
+            managed_runs.run('invalid-pair')
+        self.assertEqual({s: signal.getsignal(s) for s in previous}, previous)

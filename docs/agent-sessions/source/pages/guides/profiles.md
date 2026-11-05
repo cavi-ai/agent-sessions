@@ -98,7 +98,8 @@ latest turns. `partner show` exposes the saved `last_run` receipt. `completed`
 means the native turn completed; `failed` means it ended unsuccessfully;
 `attention` means a prerequisite prevented assignment; `unknown` means the native
 outcome needs reconciliation. Only `completed` exits successfully. Timeout
-interrupts only the turn owned by that run and closes its transport. Failed or
+interrupts only the turn owned by that run and closes its transport. SIGTERM and
+SIGINT use the same cancellation path. Failed or
 unknown runs are retained and are not replayed or replaced by later runs.
 
 ## What the launcher preserves

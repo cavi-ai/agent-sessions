@@ -6,6 +6,7 @@ import math
 import os
 import queue
 import select
+import signal
 import stat
 import subprocess
 import sys
@@ -300,7 +301,7 @@ def execute(pair, receipt, persist, timeout, filename):
             client.close()
 
 
-def run(pair_id, timeout=60, prompt_file=None):
+def _run(pair_id, timeout, prompt_file):
     pair = storage.read_pair(pair_id)
     previous = pair.get('last_run', {})
     receipt = {'pair_id': pair_id, 'session_id': pair['partner']['id'],
@@ -333,3 +334,22 @@ def run(pair_id, timeout=60, prompt_file=None):
     except (OSError, ValueError) as exc:
         print('agent-sessions: '+str(exc)[:1024], file=sys.stderr)
     return {key: receipt[key] for key in FIELDS}
+
+
+def run(pair_id, timeout=60, prompt_file=None):
+    previous = {signum: signal.getsignal(signum) for signum in (signal.SIGTERM, signal.SIGINT)}
+    interrupted = False
+
+    def interrupt(signum, frame):
+        nonlocal interrupted
+        if not interrupted:
+            interrupted = True
+            raise InterruptedError('managed run interrupted by signal '+str(signum))
+
+    try:
+        for signum in previous:
+            signal.signal(signum, interrupt)
+        return _run(pair_id, timeout, prompt_file)
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
