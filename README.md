@@ -4,8 +4,8 @@ Local discovery and two-way messaging for Codex and Claude Code sessions. See
 which sessions share a repository, their checkout, branch and uncommitted files,
 then leave a message that the receiving session reads through a hook or its inbox.
 
-Requires Python 3.9+, Git, and macOS or Linux. The runtime has no third-party
-dependencies. Windows is not supported because message storage uses POSIX locks.
+Requires Python 3.9+, Git, and macOS or Linux. Python 3.9 and 3.10 use `tomli`
+to read TOML configuration. Windows is not supported because message storage uses POSIX locks.
 
 ## Install
 
@@ -200,7 +200,9 @@ tool allowlists, or verify the host's actual tool/skill catalog.
 
 The launcher uses the configured model and native permissions. Claude launches
 repeat `--settings`, `--mcp-config` and `--strict-mcp-config`; Codex loads its
-project configuration from the worker directory. Both start and resume carry
+project configuration from the worker directory and repeats pinned app, feature,
+MCP, plugin and skill settings as native `-c` overrides on start and resume.
+Other settings retain their native configuration behavior. Both start and resume carry
 the same profile marker. `--dry-run` shows the command without starting it.
 
 Profiled partners return a guarded launch command rather than an unrestricted

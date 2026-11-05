@@ -6,6 +6,11 @@ import re
 import stat
 from pathlib import Path
 
+try:
+    import tomllib
+except ImportError:  # Python 3.9 and 3.10
+    import tomli as tomllib
+
 LIMIT = 2 * 1024 * 1024
 REQUIRED = {'codex': ('.codex/config.toml',),
             'claude': ('.claude/settings.local.json', '.mcp.json')}
@@ -158,11 +163,44 @@ def guard(data, session_id, cwd, host, marker, write, expected=None):
     return True
 
 
+def _toml(value):
+    if isinstance(value, dict):
+        return '{'+', '.join(json.dumps(k, ensure_ascii=False)+' = '+_toml(v)
+                            for k, v in value.items())+'}'
+    if isinstance(value, list):
+        return '['+', '.join(_toml(v) for v in value)+']'
+    if value is None or not isinstance(value, (str, bool, int, float)):
+        raise ProfileError('unsupported TOML value in capability settings')
+    return json.dumps(value, ensure_ascii=False, allow_nan=False)
+
+
+def codex_overrides(profile):
+    """Repeat only capability settings at the native process override layer."""
+    root = Path(profile['cwd'])
+    try:
+        with (root/'.codex/config.toml').open('rb') as stream:
+            raw = stream.read(LIMIT + 1)
+        expected = next(f for f in profile['files'] if f['path'] == '.codex/config.toml')
+        if len(raw) > LIMIT or hashlib.sha256(raw).hexdigest() != expected['sha256']:
+            raise ProfileError('profile configuration changed before launch')
+        config = tomllib.loads(raw.decode('utf-8'))
+        result = [key+'='+_toml(config[key])
+                  for key in ('apps', 'features', 'mcp_servers', 'plugins', 'skills')
+                  if key in config]
+        if sum(len(v.encode()) for v in result) > 65536:
+            raise ProfileError('capability launch overrides exceed 64 KiB')
+        return [arg for value in result for arg in ('-c', value)]
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise ProfileError(f'cannot load pinned capability TOML: {exc}') from exc
+
+
 def argv(profile, session_id=None, prompt=None):
     validate(profile)
     root = Path(profile['cwd'])
     if profile['host'] == 'codex':
-        command = ['codex'] + (['resume', session_id] if session_id else [])
+        command = ['codex', *codex_overrides(profile)]
+        if session_id:
+            command += ['resume', session_id]
     else:
         command = ['claude', '--settings', str(root/'.claude/settings.local.json'),
                    '--strict-mcp-config', '--mcp-config', str(root/'.mcp.json')]
