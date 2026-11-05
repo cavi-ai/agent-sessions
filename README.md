@@ -35,7 +35,9 @@ machine-readable output. Put these options before the subcommand.
 Codex identifies the caller with `CODEX_THREAD_ID`; Claude Code uses
 `CLAUDE_CODE_SESSION_ID`. An explicit `--session ID` overrides either. If neither
 variable is set, `inbox` infers identity only when exactly one active session
-uses the current directory. When both are set, Codex's identity takes precedence.
+uses the current directory. Both are set when one host runs inside the other's
+shell; Claude's identity wins when its `CLAUDE_PID` process is an ancestor with no
+Codex process in between, otherwise Codex's identity wins.
 
 `who` marks sessions in the target checkout `SAME WORKTREE`. Its overlap list
 compares checkout-level uncommitted paths and recently recorded edits; it does
@@ -82,6 +84,8 @@ checkout once per peer. Empty inboxes produce no output. Ordinary messaging hook
 errors are reported on stderr and exit successfully. Explicitly bound profiles
 instead block prompts and supported tool calls when their launch context or
 configuration no longer matches.
+Hooks fired inside a Claude subagent (payload `agent_id`) deliver nothing; the
+main thread's next hook reads those messages.
 Configured commands include `hook --host codex` or `hook --host claude` so partner
 invitations reach the requested host. Older commands can infer the host from
 the transcript path or matching native session environment variable. If the
@@ -114,9 +118,11 @@ Unreadable pair records report a diagnostic and are skipped during discovery;
 an invitation with missing or damaged pair metadata does not block other messages.
 
 For **Claude**, the command queues the brief as a path invitation and reports
-`waiting`. It does not launch Claude. The next Claude session under that directory
-reads the brief through its hook or inbox and runs the included `partner connect
-PAIR_ID` command, which uses its native session identity. The first valid
+`waiting`. It does not launch Claude. A Claude session that starts under that
+directory after the pair is created reads the brief through its hook or inbox and
+runs the included `partner connect PAIR_ID` command, which uses its native session
+identity. A start is a `SessionStart` hook with any source except `resume` and
+`compact`; sessions already running there do not receive the brief. The first valid
 connection claims the invitation; later sessions no longer receive it.
 If queueing fails, the saved record remains `needs_delivery` with its invitation.
 Inspect it with `partner show` and resolve the storage error before trying again;

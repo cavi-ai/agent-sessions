@@ -141,6 +141,25 @@ class ProfileTests(Machine):
         (self.data / 'bindings/codex-sub-0002.json').write_text('broken')
         self.assertEqual(self.hook_for(profile).returncode, 2)
 
+    def test_claude_subagent_preserves_messages_and_profile_guard(self):
+        profile, config = self.profile('claude')
+        self.run_tool('send', 'claude-0006', 'for the main thread')
+        payload = json.dumps({'session_id':'claude-0006', 'cwd':profile['cwd'],
+                             'hook_event_name':'UserPromptSubmit', 'agent_id':'worker'})
+        env = {**self.env, 'AGENT_SESSIONS_PROFILE_ID':profile['id']}
+        command = [sys.executable, str(TOOL), 'hook', '--host', 'claude']
+        result = subprocess.run(command, input=payload, env=env, capture_output=True,
+                                text=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, '')
+        self.assertIn('for the main thread', self.hook_for(
+            profile, 'claude-0006', 'claude').stdout)
+        for changed_env in (self.env, env):
+            config.write_text(config.read_text()+'\n')
+            result = subprocess.run(command, input=payload, env=changed_env,
+                                    capture_output=True, text=True, check=False)
+            self.assertEqual(result.returncode, 2, result.stderr)
+
     def test_missing_binding_of_a_profiled_partner_does_not_allow_bare_reopen(self):
         profile, _ = self.profile()
         pair=json.loads(self.run_tool('partner','codex',str(self.worktree),'Check a.txt',
