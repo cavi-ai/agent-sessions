@@ -51,8 +51,10 @@ enabled_tools = ["inspect"]
         self.rpc_state.write_text(json.dumps(state))
         return state
 
-    def run_pair(self, timeout='5', prompt_file=None):
+    def run_pair(self, timeout='5', prompt_file=None, no_mcp=False):
         extra = ['--prompt-file', str(prompt_file)] if prompt_file is not None else []
+        if no_mcp:
+            extra.append('--no-mcp')
         result = subprocess.run([sys.executable, str(TOOL), 'partner', 'run', self.pair['id'],
                                  '--timeout', timeout, *extra], env=self.env, capture_output=True,
                                 text=True, timeout=15, check=False)
@@ -186,6 +188,20 @@ enabled_tools = ["inspect"]
     def test_empty_provider_profile_runs_with_no_exposed_mcp_tools(self):
         self.repin(self.config.read_text().split('[mcp_servers.fixture]')[0])
         receipt = self.run_pair()
+        self.assertEqual(receipt['status'], 'completed')
+        self.assertEqual(receipt['capabilities']['mcp_tools'], {})
+
+    def test_no_mcp_ceiling_rejects_tool_enabled_profile_before_any_host_work(self):
+        receipt = self.run_pair(no_mcp=True)
+        self.assertEqual(receipt['status'], 'attention')
+        self.assertIsNone(receipt['session_id'])
+        self.assertIsNone(receipt['turn_id'])
+        self.assertEqual(self.methods(), [])
+        self.assertNotIn('native_identity', self.native())
+
+    def test_no_mcp_ceiling_allows_an_empty_provider_scope(self):
+        self.repin(self.config.read_text().split('[mcp_servers.fixture]')[0])
+        receipt = self.run_pair(no_mcp=True)
         self.assertEqual(receipt['status'], 'completed')
         self.assertEqual(receipt['capabilities']['mcp_tools'], {})
 

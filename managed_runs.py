@@ -220,7 +220,7 @@ def discovered_tools(client, session_id, expected, deadline):
     return actual
 
 
-def execute(pair, receipt, persist, timeout, filename):
+def execute(pair, receipt, persist, timeout, filename, no_mcp):
     previous = pair.get('last_run', {})
     profile = profiles.load(storage.data_dir(), pair['profile'])
     if profile['host'] != 'codex' or pair['partner']['host'] != 'codex':
@@ -231,6 +231,8 @@ def execute(pair, receipt, persist, timeout, filename):
     overrides = profiles.codex_overrides(profile)
     config = profiles.tomllib.loads('\n'.join(overrides[1::2]))
     expected = capabilities(config)
+    if no_mcp and expected:
+        raise Attention('caller requires no MCP servers, but the pinned profile enables them')
     deadline = time.monotonic() + timeout
     client, owned_turn = None, None
 
@@ -351,7 +353,7 @@ def execute(pair, receipt, persist, timeout, filename):
             client.close()
 
 
-def _run(pair_id, timeout, prompt_file):
+def _run(pair_id, timeout, prompt_file, no_mcp):
     pair = storage.read_pair(pair_id)
     previous = pair.get('last_run', {})
     receipt = {'pair_id': pair_id, 'session_id': pair['partner']['id'],
@@ -385,7 +387,7 @@ def _run(pair_id, timeout, prompt_file):
                 storage.write_json(storage.pair_path(pair_id), pair)
 
             try:
-                execute(pair, receipt, persist, timeout, prompt_file)
+                execute(pair, receipt, persist, timeout, prompt_file, no_mcp)
             except (OSError, ValueError, KeyError, TypeError) as exc:
                 receipt['error'] = str(exc)[:1024]
                 persist('preflight', 'attention')
@@ -395,7 +397,7 @@ def _run(pair_id, timeout, prompt_file):
     return {key: receipt[key] for key in FIELDS}
 
 
-def run(pair_id, timeout=60, prompt_file=None):
+def run(pair_id, timeout=60, prompt_file=None, no_mcp=False):
     previous = {signum: signal.getsignal(signum) for signum in (signal.SIGTERM, signal.SIGINT)}
     interrupted = False
 
@@ -408,7 +410,7 @@ def run(pair_id, timeout=60, prompt_file=None):
     try:
         for signum in previous:
             signal.signal(signum, interrupt)
-        return _run(pair_id, timeout, prompt_file)
+        return _run(pair_id, timeout, prompt_file, no_mcp)
     finally:
         for signum, handler in previous.items():
             signal.signal(signum, handler)

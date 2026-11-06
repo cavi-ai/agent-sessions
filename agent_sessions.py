@@ -1144,11 +1144,12 @@ def _main(argv=None):
     running.add_argument('pair_id')
     running.add_argument('--timeout', type=float, default=60)
     running.add_argument('--prompt-file', help='canonical UTF-8 prompt file, at most 64 KiB')
+    running.add_argument('--no-mcp', action='store_true', help='refuse any enabled MCP server')
     args = parser.parse_args(argv)
 
     if args.command == 'partner' and args.partner_action == 'run':
         from managed_runs import run
-        result = run(args.pair_id, args.timeout, args.prompt_file)
+        result = run(args.pair_id, args.timeout, args.prompt_file, args.no_mcp)
         print(json.dumps(result, indent=2))
         return 0 if result['status'] == 'completed' else 1
 

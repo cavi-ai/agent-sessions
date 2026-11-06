@@ -85,6 +85,10 @@ command hooks. The pinned Codex profile must disable `features.hooks`,
 Unexpected inherited servers or discovered tools prevent assignment. Model and
 permission settings retain their native configuration behavior.
 
+Use `--no-mcp` when the caller requires an empty MCP scope. It rejects any enabled
+server in the pinned profile before starting an App Server process. Effective
+configuration and discovered-tool checks still apply to profiles that pass.
+
 The default prompt is the saved pair brief. `--prompt-file` supplies later work
 without changing that brief. It requires a canonical absolute path to a regular
 UTF-8 file, at most 64 KiB. The JSON receipt contains `pair_id`, `session_id`,
