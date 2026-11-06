@@ -197,27 +197,40 @@ def preassignment_absence(client, session_id, deadline):
 
 
 def discovered_tools(client, session_id, expected, deadline):
-    actual, seen, cursor = {}, set(), None
-    for _ in range(100):
-        result = client.request('mcpServerStatus/list', {'threadId': session_id,
-            'detail': 'toolsAndAuthOnly', 'limit': 100, 'cursor': cursor}, deadline)
-        for server in result['data']:
-            name, tools = server['name'], server.get('tools', {})
-            if name in seen:
-                raise Attention('duplicate native server inventory')
-            seen.add(name)
-            if tools or name in expected:
-                if server.get('toolsError') or server.get('runtimeStatus') != 'connected':
-                    raise Attention('MCP server is unavailable: '+name)
-                actual[name] = sorted(tools)
-        cursor = result.get('nextCursor')
-        if cursor is None:
-            break
-    else:
-        raise Attention('MCP inventory pagination exceeds limit')
-    if actual != expected:
-        raise Attention('native MCP tools differ from pinned allowlists')
-    return actual
+    while time.monotonic() < deadline:
+        actual, seen, pending, cursor = {}, set(), set(), None
+        for _ in range(100):
+            try:
+                result = client.request('mcpServerStatus/list', {'threadId': session_id,
+                    'detail': 'toolsAndAuthOnly', 'limit': 100, 'cursor': cursor}, deadline)
+            except TimeoutError:
+                raise Attention('MCP startup did not finish before the managed deadline') from None
+            for server in result['data']:
+                name, tools = server['name'], server.get('tools', {})
+                if name in seen:
+                    raise Attention('duplicate native server inventory')
+                seen.add(name)
+                if tools or name in expected:
+                    status = server.get('runtimeStatus')
+                    if name in expected and status in ('notStarted', 'starting'):
+                        pending.add(name)
+                    elif server.get('toolsError'):
+                        raise Attention('MCP tool discovery failed: '+name)
+                    elif status != 'connected':
+                        raise Attention('MCP server is unavailable: '+name)
+                    else:
+                        actual[name] = sorted(tools)
+            cursor = result.get('nextCursor')
+            if cursor is None:
+                break
+        else:
+            raise Attention('MCP inventory pagination exceeds limit')
+        if actual != {name: tools for name, tools in expected.items() if name not in pending}:
+            raise Attention('native MCP tools differ from pinned allowlists')
+        if not pending:
+            return actual
+        time.sleep(min(.05, max(0, deadline-time.monotonic())))
+    raise Attention('MCP startup did not finish before the managed deadline')
 
 
 def public_receipt(receipt):
@@ -335,6 +348,29 @@ def execute(pair, receipt, persist, timeout, filename, no_mcp):
         if method == 'thread/start':
             if thread.get('turns') != []:
                 raise Attention('fresh native thread must return an explicit empty turn history')
+            # Read live metadata before history so a completed intervening turn is visible.
+            metadata = client.request('thread/read', {'threadId': native_id,
+                                       'includeTurns': False}, deadline)['thread']
+            if (metadata.get('id') != native_id or metadata.get('cwd') != profile['cwd']
+                    or metadata.get('status', {}).get('type') != 'idle'
+                    or metadata.get('turns', []) != []):
+                raise Attention('fresh native thread changed before assignment')
+            history_absent = False
+            try:
+                current = client.request('thread/read', {'threadId': native_id,
+                                          'includeTurns': True}, deadline)['thread']
+            except NativeError as exc:
+                # Legacy persistent roots materialize their rollout at the first user message.
+                absent = ('thread '+native_id+' is not materialized yet; '
+                          'includeTurns is unavailable before first user message')
+                if exc.code != -32600 or exc.message != absent:
+                    raise
+                current = metadata
+                history_absent = True
+            if (current.get('id') != native_id or current.get('cwd') != profile['cwd']
+                    or current.get('status', {}).get('type') != 'idle'
+                    or not history_absent and current.get('turns') != []):
+                raise Attention('fresh native thread changed before assignment')
         else:
             latest = latest_turn(client, native_id, deadline)
             if ((latest or {}).get('id') != receipt['expected_turn_id'] or

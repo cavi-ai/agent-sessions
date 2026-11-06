@@ -85,6 +85,12 @@ command hooks. The pinned Codex profile must disable `features.hooks`,
 Unexpected inherited servers or discovered tools prevent assignment. Model and
 permission settings retain their native configuration behavior.
 
+Required servers may report `notStarted` or `starting` while their initial
+connection is pending. The runner waits within the existing run deadline, then
+requires their exact connected tool inventory before submitting work. A failed,
+cancelled, disabled or authentication-required server stops assignment. Startup
+waiting does not restart a server or initiate a login.
+
 Use `--no-mcp` when the caller requires an empty MCP scope. It rejects any enabled
 server in the pinned profile before starting an App Server process. Effective
 configuration and discovered-tool checks still apply to profiles that pass.
@@ -106,8 +112,15 @@ interrupts only the turn owned by that run and closes its transport. SIGTERM and
 SIGINT use the same cancellation path. Failed or
 unknown runs are retained and are not replayed or replaced by later runs.
 
-Fresh idle threads use their explicitly empty returned history before the first
-turn is submitted. If a preassignment `attention` session later disappears, two
+Fresh idle threads must return explicitly empty history and still be idle with
+empty history after MCP startup. External steering during startup prevents the
+first assignment. An `attention` receipt alone does not prove the session is idle
+or release a consumer's native reservations.
+Legacy persistent roots can report the exact native unmaterialized-history error
+before their first user message. Only that response, after a current identity,
+directory and idle-state check, counts as absent history; other read failures stop
+assignment.
+If a preassignment `attention` session later disappears, two
 exact native absence responses are required before replacing it. The pair retains
 the prior ID, receipt and absence evidence. Submitted or uncertain runs cannot use
 this reconciliation. Native error codes and bounded messages appear in `last_run`.

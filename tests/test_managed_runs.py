@@ -112,6 +112,50 @@ enabled_tools = ["inspect"]
         self.assertIsNotNone(receipt['session_id'])
         self.assertNotIn('turn/start', self.methods())
 
+    def test_mcp_startup_waits_for_connected_scope_before_assigning_work(self):
+        self.native(mcp_states=['notStarted', 'starting', 'connected'])
+        result = self.run_pair()
+        self.assertEqual(result['status'], 'completed')
+        methods = self.methods()
+        self.assertEqual(methods.count('thread/start'), 1)
+        self.assertEqual(methods.count('mcpServerStatus/list'), 3)
+        self.assertEqual(methods.count('turn/start'), 1)
+        self.assertLess(methods.index('mcpServerStatus/list'), methods.index('turn/start'))
+
+    def test_terminal_mcp_states_never_start_work_or_retry_startup(self):
+        for status in ('failed', 'cancelled', 'disabled', 'authenticationRequired'):
+            with self.subTest(status=status):
+                self.native(mcp_states=[status], requests=[], turns=[])
+                self.assertEqual(self.run_pair()['status'], 'attention')
+                self.assertNotIn('turn/start', self.methods())
+                self.assertEqual(self.methods().count('mcpServerStatus/list'), 1)
+
+    def test_mcp_startup_deadline_keeps_identity_without_submitting_a_turn(self):
+        self.native(mcp_states=['starting'])
+        result = self.run_pair('0.5')
+        self.assertEqual(result['status'], 'attention')
+        self.assertIsNotNone(result['session_id'])
+        self.assertNotIn('turn/start', self.methods())
+        self.assertNotIn('turn/interrupt', self.methods())
+
+    def test_external_steering_during_mcp_startup_blocks_fresh_assignment(self):
+        self.native(mcp_states=['starting', 'connected'], steer_during_startup=True)
+        self.assertEqual(self.run_pair()['status'], 'attention')
+        self.assertNotIn('turn/start', self.methods())
+
+    def test_startup_catalog_error_does_not_accept_cached_tools(self):
+        self.native(mcp_states=['starting', 'connected'],
+                    mcp_tools_errors=['catalog not ready', None])
+        self.assertEqual(self.run_pair()['status'], 'completed')
+        self.assertEqual(self.methods().count('mcpServerStatus/list'), 2)
+        self.assertEqual(self.methods().count('turn/start'), 1)
+
+    def test_connected_discovery_error_is_not_retried(self):
+        self.native(mcp_states=['connected'], mcp_tools_error='catalog failed')
+        self.assertEqual(self.run_pair()['status'], 'attention')
+        self.assertEqual(self.methods().count('mcpServerStatus/list'), 1)
+        self.assertNotIn('turn/start', self.methods())
+
     def test_unknown_launch_is_not_retried_or_replaced(self):
         self.native(lose_launch=True)
         self.assertEqual(self.run_pair()['status'], 'unknown')
@@ -298,9 +342,21 @@ enabled_tools = ["inspect"]
         self.assertEqual({s: signal.getsignal(s) for s in previous}, previous)
 
     def test_fresh_idle_thread_does_not_need_materialized_history(self):
-        self.native(reject_empty_history=True)
+        self.native(reject_empty_history=True, unmaterialized_read=True)
         self.assertEqual(self.run_pair()['status'], 'completed')
         self.assertNotIn('thread/turns/list', self.methods())
+
+    def test_fresh_history_backend_error_never_becomes_empty_history(self):
+        self.native(read_history_error=True)
+        self.assertEqual(self.run_pair()['status'], 'attention')
+        self.assertNotIn('turn/start', self.methods())
+
+    def test_steering_after_fresh_metadata_is_checked_by_the_history_read(self):
+        self.native(unmaterialized_read=True, steer_after_metadata=True)
+        self.assertEqual(self.run_pair()['status'], 'attention')
+        self.assertNotIn('turn/start', self.methods())
+        reads = [r for r in self.native()['requests'] if r['method'] == 'thread/read']
+        self.assertEqual([r['params']['includeTurns'] for r in reads], [False, True])
 
     def test_unsubmitted_attention_reconciles_only_explicit_native_absence(self):
         self.native(unexpected_tool=True)

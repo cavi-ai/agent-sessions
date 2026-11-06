@@ -46,9 +46,9 @@ A claim reserves the message for one session and replies to the sender. A direct
 can also be the recipient: the message waits for sessions under that path until
 one claims it. Reading a message alone does not reserve it.
 
-## Automatic delivery
+## Optional automatic delivery
 
-Register hooks for the hosts you use:
+For automatic queued-message delivery, register hooks for the hosts you use:
 
 ```sh
 agent-sessions configure codex
@@ -61,6 +61,10 @@ turn; messages arrive at the next supported hook or explicit `inbox` call.
 
 See [Hook setup](docs/agent-sessions/source/pages/guides/hooks.md) for previews,
 trust review, updates and removal.
+
+Managed Codex `partner run` validates its pinned configuration, effective tools
+and history directly. It requires no global hook installation; see
+[managed worker profiles](docs/agent-sessions/source/pages/guides/profiles.md#run-a-managed-codex-turn).
 
 ## Documentation
 
