@@ -93,6 +93,9 @@ for line in sys.stdin:
         if state.get('lose_turn_response'):
             sys.exit(0)
         send({'id': request['id'], 'result': {'turn': turn}})
+        for item in state.get('mcp_items',[]):
+            send({'method':'item/completed','params':{'threadId':thread_id,
+                'turnId':state.get('mcp_turn',turn['id']),'item':item}})
         if state.get('approval'):
             send({'id': 'approval-1', 'method': 'item/commandExecution/requestApproval',
                   'params': {'threadId': thread_id, 'turnId': turn['id']}})

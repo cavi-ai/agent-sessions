@@ -1077,6 +1077,7 @@ def _main(argv=None):
                         help="sessions updated within this many minutes count as active")
     parser.add_argument("--json", action="store_true")
     sub = parser.add_subparsers(dest="command", required=True)
+    sub.add_parser("protocol", help="supported managed receipt contracts")
     listing = sub.add_parser("list", help="active sessions with cwd, worktree, branch and status")
     listing.add_argument("--reviews", action="store_true", help="include Codex approval reviewers")
     sharing = sub.add_parser("who", help="active sessions in the same repository as PATH")
@@ -1146,6 +1147,10 @@ def _main(argv=None):
     running.add_argument('--prompt-file', help='canonical UTF-8 prompt file, at most 64 KiB')
     running.add_argument('--no-mcp', action='store_true', help='refuse any enabled MCP server')
     args = parser.parse_args(argv)
+
+    if args.command == 'protocol':
+        print(json.dumps({'version':1,'managed_run':{'mcp_call_receipts':'canonical-json-sha256','maximum_mcp_calls':64}}))
+        return 0
 
     if args.command == 'partner' and args.partner_action == 'run':
         from managed_runs import run

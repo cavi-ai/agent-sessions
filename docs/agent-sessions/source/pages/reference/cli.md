@@ -90,3 +90,5 @@ marker without starting it.
 
 See [Worker profiles](../guides/profiles.md) for required files, credential handling
 and the limits of profile checks.
+
+`agent-sessions protocol` reports supported managed receipt contracts without starting a host.

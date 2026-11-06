@@ -144,3 +144,9 @@ permissions and mandatory project instructions in force.
 Keep profile and binding data intact. Removing that metadata can lose the record
 needed to check or resume a worker. For recovery steps, see
 [Troubleshooting](troubleshooting.md) and the [security model](../security/model.md).
+
+Managed receipts may include up to 64 host-observed MCP call records. Each contains
+the call ID, server, tool, terminal status and SHA-256 digests of the arguments and
+structured result. Raw arguments and results are omitted. Calls must belong to the
+owned turn and pinned tool scope; duplicate completion IDs must agree. These
+records establish what the native host observed, not downstream artifact quality.
