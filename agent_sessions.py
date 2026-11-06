@@ -417,12 +417,12 @@ def private_dir(path):
 
 
 @contextmanager
-def locked(path):
+def locked(path, blocking=True):
     private_parent(path)
     descriptor = os.open(path.with_suffix(path.suffix + ".lock"), os.O_WRONLY | os.O_CREAT, 0o600)
     with os.fdopen(descriptor, "w") as handle:
         os.fchmod(handle.fileno(), 0o600)
-        fcntl.flock(handle, fcntl.LOCK_EX)
+        fcntl.flock(handle, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
         yield
 
 
@@ -1140,7 +1140,18 @@ def _main(argv=None):
     resuming.add_argument('pair_id')
     resuming.add_argument('--session', help='caller session id (default: this session)')
     resuming.add_argument('--dry-run', action='store_true')
+    running = actions.add_parser('run', help='run one Codex partner turn without command hooks')
+    running.add_argument('pair_id')
+    running.add_argument('--timeout', type=float, default=60)
+    running.add_argument('--prompt-file', help='canonical UTF-8 prompt file, at most 64 KiB')
+    running.add_argument('--no-mcp', action='store_true', help='refuse any enabled MCP server')
     args = parser.parse_args(argv)
+
+    if args.command == 'partner' and args.partner_action == 'run':
+        from managed_runs import run
+        result = run(args.pair_id, args.timeout, args.prompt_file, args.no_mcp)
+        print(json.dumps(result, indent=2))
+        return 0 if result['status'] == 'completed' else 1
 
     if args.command == 'profile':
         if args.profile_action == 'create':

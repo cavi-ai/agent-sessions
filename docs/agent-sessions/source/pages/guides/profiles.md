@@ -70,6 +70,52 @@ An existing worker can be attached with `partner attach SESSION_ID --profile
 PROFILE_ID` only after the worker has recorded that profile through its launcher
 and hooks. Attachment does not apply a profile to an ordinary open chat.
 
+## Run a managed Codex turn
+
+```sh
+agent-sessions partner run PAIR_ID --timeout 60
+agent-sessions partner run PAIR_ID --prompt-file /path/to/prompt.txt --timeout 60
+agent-sessions partner show PAIR_ID
+```
+
+`partner run` owns one App Server process and checks the profile directly, without
+command hooks. The pinned Codex profile must disable `features.hooks`,
+`features.apps`, `features.plugins`, `features.skill_search` and
+`skills.include_instructions`. Every enabled MCP server must declare `enabled_tools`.
+Unexpected inherited servers or discovered tools prevent assignment. Model and
+permission settings retain their native configuration behavior.
+
+Use `--no-mcp` when the caller requires an empty MCP scope. It rejects any enabled
+server in the pinned profile before starting an App Server process. Effective
+configuration and discovered-tool checks still apply to profiles that pass.
+
+The default prompt is the saved pair brief. `--prompt-file` supplies later work
+without changing that brief. It requires a canonical absolute path to a regular
+UTF-8 file, at most 64 KiB. The JSON receipt contains `pair_id`, `session_id`,
+`profile_id`, `turn_id`, `status`, `output_text`, `prompt_sha256` and `capabilities`.
+The capabilities contain checked `mcp_tools` names and `automatic_skill_context:
+false`, which records the required context settings, not a filesystem restriction
+or native asset acceptance. Output text is limited to 64 KiB.
+
+Successful later runs resume the same session and reject active or unexpected
+latest turns. `partner show` exposes the saved `last_run` receipt. `completed`
+means the native turn completed; `failed` means it ended unsuccessfully;
+`attention` means a prerequisite prevented assignment; `unknown` means the native
+outcome needs reconciliation. Only `completed` exits successfully. Timeout
+interrupts only the turn owned by that run and closes its transport. SIGTERM and
+SIGINT use the same cancellation path. Failed or
+unknown runs are retained and are not replayed or replaced by later runs.
+
+Fresh idle threads use their explicitly empty returned history before the first
+turn is submitted. If a preassignment `attention` session later disappears, two
+exact native absence responses are required before replacing it. The pair retains
+the prior ID, receipt and absence evidence. Submitted or uncertain runs cannot use
+this reconciliation. Native error codes and bounded messages appear in `last_run`.
+
+When invoked from a native session, `partner run` requires that session to be one
+of the pair's endpoints. Terminal use without a native session identity remains
+available.
+
 ## What the launcher preserves
 
 Both hosts use their configured model and native permission settings. Claude
