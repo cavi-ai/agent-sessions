@@ -353,3 +353,31 @@ enabled_tools = ["inspect"]
         self.assertEqual(self.run_pair()['status'], 'attention')
         self.assertEqual(self.methods(), [])
         self.assertEqual(path.read_bytes(), before)
+
+    def test_host_mcp_call_digests_omit_arguments_and_result_text(self):
+        args={'selected':'private source'}
+        value={'status':'built','source':'private result'}
+        event={'type':'mcpToolCall','id':'call-1','server':'fixture','tool':'inspect',
+               'arguments':args,'status':'completed','result':{'content':[], 'structuredContent':value},'error':None}
+        self.native(mcp_items=[event,event])
+        result=self.run_pair()
+        self.assertEqual(result['status'],'completed')
+        encode=lambda value:json.dumps(value,sort_keys=True,separators=(',',':'),allow_nan=False).encode()
+        self.assertEqual(result['tool_calls'],[{'id':'call-1','server':'fixture','tool':'inspect',
+            'status':'completed','arguments_sha256':hashlib.sha256(encode(args)).hexdigest(),
+            'result_sha256':hashlib.sha256(encode(value)).hexdigest()}])
+        self.assertNotIn('private source',json.dumps(result))
+        self.assertNotIn('private result',json.dumps(result))
+
+    def test_foreign_turn_mcp_events_cannot_attest_this_assignment(self):
+        event={'type':'mcpToolCall','id':'foreign-call','server':'fixture','tool':'inspect',
+               'arguments':{},'status':'completed','result':{'content':[],'structuredContent':{}},'error':None}
+        self.native(mcp_items=[event],mcp_turn='unowned-turn')
+        result=self.run_pair()
+        self.assertEqual(result['status'],'completed')
+        self.assertNotIn('tool_calls',result)
+
+    def test_protocol_advertises_host_call_receipts_before_launch(self):
+        self.assertEqual(json.loads(self.run_tool('protocol')),
+            {'version':1,'managed_run':{'mcp_call_receipts':'canonical-json-sha256','maximum_mcp_calls':64}})
+        self.assertEqual(self.methods(),[])

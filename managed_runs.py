@@ -220,6 +220,39 @@ def discovered_tools(client, session_id, expected, deadline):
     return actual
 
 
+def public_receipt(receipt):
+    result={key:receipt[key] for key in FIELDS}
+    if receipt.get('tool_calls'):
+        result['tool_calls']=receipt['tool_calls']
+    return result
+
+
+def record_mcp_call(item, receipt, expected):
+    if item.get('type') != 'mcpToolCall':
+        return
+    if (any(not isinstance(item.get(key),str) or not 1 <= len(item[key]) <= 200 for key in ('id','server','tool'))
+            or item.get('status') not in ('completed','failed')
+            or item['tool'] not in expected.get(item['server'],[])):
+        raise Attention('host MCP call differs from the pinned scope')
+    encode=lambda value:json.dumps(value,sort_keys=True,separators=(',',':'),allow_nan=False).encode()
+    result=item.get('result') or {}
+    if not isinstance(result,dict):
+        raise Attention('invalid host MCP result')
+    structured=result.get('structuredContent')
+    value={key:item[key] for key in ('id','server','tool','status')}
+    value.update(arguments_sha256=hashlib.sha256(encode(item.get('arguments'))).hexdigest(),
+                 result_sha256=hashlib.sha256(encode(structured)).hexdigest() if structured is not None and not item.get('error') else None)
+    calls=receipt.setdefault('tool_calls',[])
+    previous=next((call for call in calls if call['id']==value['id']),None)
+    if previous is not None:
+        if previous != value:
+            raise Attention('host MCP completion changed')
+        return
+    if len(calls) >= 64:
+        raise Attention('managed MCP call receipt exceeds 64 entries')
+    calls.append(value)
+
+
 def execute(pair, receipt, persist, timeout, filename, no_mcp):
     previous = pair.get('last_run', {})
     profile = profiles.load(storage.data_dir(), pair['profile'])
@@ -322,10 +355,15 @@ def execute(pair, receipt, persist, timeout, filename, no_mcp):
                 continue
             if event.get('method') == 'item/completed' and params.get('turnId') == owned_turn:
                 item = params['item']
+                record_mcp_call(item,receipt,expected)
+                if item.get('type')=='mcpToolCall':
+                    persist('running','unknown')
                 if item.get('type') == 'agentMessage':
                     output.append(item.get('text', ''))
             if event.get('method') == 'turn/completed' and params['turn']['id'] == owned_turn:
                 ended = params['turn']
+                for item in ended.get('items',[]):
+                    record_mcp_call(item,receipt,expected)
                 if not output:
                     output = [i.get('text', '') for i in ended.get('items', [])
                               if i.get('type') == 'agentMessage']
@@ -372,7 +410,7 @@ def _run(pair_id, timeout, prompt_file, no_mcp):
                    (previous.get('turn_submitted') is True or
                     previous.get('phase') in ('submitting', 'running')))
         if previous.get('status') in ('unknown', 'failed') or pending:
-            return {key: previous[key] for key in FIELDS}
+            return public_receipt(previous)
         with storage.locked(storage.pair_path(pair_id), blocking=False):
             if storage.read_pair(pair_id) != pair:
                 raise Attention('pair changed before ownership was acquired')
@@ -394,7 +432,7 @@ def _run(pair_id, timeout, prompt_file, no_mcp):
                 print('agent-sessions: '+receipt['error'], file=sys.stderr)
     except (OSError, ValueError) as exc:
         print('agent-sessions: '+str(exc)[:1024], file=sys.stderr)
-    return {key: receipt[key] for key in FIELDS}
+    return public_receipt(receipt)
 
 
 def run(pair_id, timeout=60, prompt_file=None, no_mcp=False):
