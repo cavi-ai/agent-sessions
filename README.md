@@ -69,6 +69,14 @@ and project instructions remain applicable. These checks establish context and
 tool scope, not a filesystem sandbox. It requires no global hook installation; see
 [managed worker profiles](docs/agent-sessions/source/pages/guides/profiles.md#run-a-managed-codex-turn).
 
+## Resource admission
+
+The [resource broker](docs/agent-sessions/source/pages/guides/resources.md) provides
+host-local FIFO tickets for native supervisors. Waiting, admission and release
+are machine-consumed state; peer messages remain for decisions and handoffs.
+The broker preserves unresolved native outcomes and exposes scoped terminal
+events without starting model turns. It adds no background service or MCP server.
+
 ## Documentation
 
 Read the guides at [cavi-ai.xyz/docs/agent-sessions](https://cavi-ai.xyz/docs/agent-sessions).
