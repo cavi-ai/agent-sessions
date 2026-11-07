@@ -63,7 +63,10 @@ See [Hook setup](docs/agent-sessions/source/pages/guides/hooks.md) for previews,
 trust review, updates and removal.
 
 Managed Codex `partner run` validates its pinned configuration, effective tools
-and history directly. It requires no global hook installation; see
+and history directly. Workers disable apps, plugins, hooks, automatic skills and
+workspace memory, and start without inherited coordinator turns. Mandatory host
+and project instructions remain applicable. These checks establish context and
+tool scope, not a filesystem sandbox. It requires no global hook installation; see
 [managed worker profiles](docs/agent-sessions/source/pages/guides/profiles.md#run-a-managed-codex-turn).
 
 ## Documentation

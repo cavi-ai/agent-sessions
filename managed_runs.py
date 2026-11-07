@@ -151,10 +151,11 @@ def prompt_text(pair, filename):
 
 def capabilities(config):
     features, skills = config.get('features', {}), config.get('skills', {})
-    if (any(features.get(name) is not False for name in ('hooks', 'apps', 'plugins', 'skill_search'))
+    if (any(features.get(name) is not False for name in
+            ('hooks', 'apps', 'plugins', 'skill_search', 'memories'))
             or skills.get('include_instructions') is not False):
         raise Attention('managed runs require hooks, apps, plugins, skill_search and '
-                        'automatic skill instructions disabled')
+                        'automatic skill instructions and memories disabled')
     servers = config.get('mcp_servers', {})
     expected = {}
     for name, server in servers.items():
@@ -172,16 +173,35 @@ def latest_turn(client, session_id, deadline):
     result = client.request('thread/turns/list', {'threadId': session_id, 'limit': 1,
                             'sortDirection': 'desc', 'itemsView': 'notLoaded'}, deadline)
     turns = result['data']
-    if len(turns) > 1:
-        raise Attention('native latest-turn response was not bounded')
+    if (not isinstance(turns, list) or len(turns) > 1
+            or not turns and result.get('nextCursor') is not None
+            or turns and (not isinstance(turns[0], dict)
+                          or not isinstance(turns[0].get('id'), str) or not turns[0]['id'])):
+        raise Attention('native latest-turn response was malformed or not bounded')
     return turns[0] if turns else None
+
+
+def configured_client(profile, overrides, expected, deadline):
+    client = Rpc(profile, overrides)
+    try:
+        client.request('initialize', {'clientInfo': {'name': 'agent-sessions', 'version': '0.1.0'},
+                                      'capabilities': {'experimentalApi': True}}, deadline)
+        client.send({'method': 'initialized', 'params': {}}, deadline)
+        effective = client.request('config/read', {'cwd': profile['cwd'],
+                                  'includeLayers': False}, deadline)['config']
+        if capabilities(effective) != expected:
+            raise Attention('effective enabled raw MCP servers differ from profile')
+        return client
+    except BaseException:
+        client.close()
+        raise
 
 
 def preassignment_absence(client, session_id, deadline):
     """Both native reads must report the exact missing persisted/live identity."""
     proof = []
     for method, params in (
-            ('thread/read', {'threadId': session_id, 'includeTurns': True}),
+            ('thread/read', {'threadId': session_id, 'includeTurns': False}),
             ('thread/turns/list', {'threadId': session_id, 'limit': 1,
                                  'sortDirection': 'desc', 'itemsView': 'notLoaded'})):
         try:
@@ -277,6 +297,9 @@ def execute(pair, receipt, persist, timeout, filename, no_mcp):
     overrides = profiles.codex_overrides(profile)
     config = profiles.tomllib.loads('\n'.join(overrides[1::2]))
     expected = capabilities(config)
+    if receipt['session_id'] and previous.get('capabilities', {}).get('memory_context') is not False:
+        raise Attention('existing worker memory context was not checked; preserve its identity '
+                        'and reconcile the assignment before preparing a fresh worker')
     if no_mcp and expected:
         raise Attention('caller requires no MCP servers, but the pinned profile enables them')
     deadline = time.monotonic() + timeout
@@ -287,14 +310,8 @@ def execute(pair, receipt, persist, timeout, filename, no_mcp):
                        profile['id'], storage.write_json, expected=profile['id'])
 
     try:
-        client = Rpc(profile, overrides)
-        client.request('initialize', {'clientInfo': {'name': 'agent-sessions', 'version': '0.1.0'},
-                                      'capabilities': {'experimentalApi': True}}, deadline)
-        client.send({'method': 'initialized', 'params': {}}, deadline)
-        effective = client.request('config/read', {'cwd': profile['cwd'],
-                                  'includeLayers': False}, deadline)['config']
-        if capabilities(effective) != expected:
-            raise Attention('effective enabled raw MCP servers differ from profile')
+        client = configured_client(profile, overrides, expected, deadline)
+        receipt['capabilities'].update(automatic_skill_context=False, memory_context=False)
         session_id = receipt['session_id']
         if session_id:
             guard()
@@ -363,10 +380,46 @@ def execute(pair, receipt, persist, timeout, filename, no_mcp):
                 # Legacy persistent roots materialize their rollout at the first user message.
                 absent = ('thread '+native_id+' is not materialized yet; '
                           'includeTurns is unavailable before first user message')
-                if exc.code != -32600 or exc.message != absent:
+                if exc.code == -32601 and exc.message == 'list_turns is not supported yet':
+                    try:
+                        newest = latest_turn(client, native_id, deadline)
+                    except NativeError as history_error:
+                        if (history_error.code != -32601 or
+                                history_error.message != 'list_turns is not supported yet'):
+                            raise
+                        # Some new-root adapters cannot list history until reloaded.
+                        # Reopen the same bound identity once; never replace it or submit yet.
+                        guard()
+                        profiles.validate(profile)
+                        client.close()
+                        client = None
+                        receipt['capabilities'].update(automatic_skill_context=None, memory_context=None)
+                        client = configured_client(profile, overrides, expected, deadline)
+                        receipt['capabilities'].update(automatic_skill_context=False, memory_context=False)
+                        loaded = client.request('thread/resume', {'threadId': native_id,
+                            'excludeTurns': True, 'cwd': profile['cwd'], 'config': config}, deadline)['thread']
+                        if (loaded.get('id') != native_id or loaded.get('cwd') != profile['cwd']
+                                or loaded.get('sessionId', native_id) != native_id
+                                or loaded.get('status', {}).get('type') != 'idle'):
+                            raise Attention('reloaded native root identity or state changed')
+                        receipt['capabilities']['mcp_tools'] = discovered_tools(client, native_id, expected, deadline)
+                        guard()
+                        metadata = client.request('thread/read', {'threadId': native_id,
+                            'includeTurns': False}, deadline)['thread']
+                        if (metadata.get('id') != native_id or metadata.get('cwd') != profile['cwd']
+                                or metadata.get('status', {}).get('type') != 'idle'
+                                or metadata.get('turns', []) != []):
+                            raise Attention('reloaded native root changed before assignment')
+                        newest = latest_turn(client, native_id, deadline)
+                        receipt['history_check'] = {'method': 'thread/turns/list', 'reloaded_same_root': True}
+                    if newest is not None:
+                        raise Attention('fresh native thread acquired history before assignment')
+                    current = {**metadata, 'turns': []}
+                elif exc.code == -32600 and exc.message == absent:
+                    current = metadata
+                    history_absent = True
+                else:
                     raise
-                current = metadata
-                history_absent = True
             if (current.get('id') != native_id or current.get('cwd') != profile['cwd']
                     or current.get('status', {}).get('type') != 'idle'
                     or not history_absent and current.get('turns') != []):
@@ -435,7 +488,7 @@ def _run(pair_id, timeout, prompt_file, no_mcp):
         'expected_turn_id': previous.get('turn_id') or previous.get('expected_turn_id'),
         'turn_submitted': False,
         'status': 'attention', 'output_text': '', 'prompt_sha256': None,
-        'capabilities': {'mcp_tools': {}, 'automatic_skill_context': False}}
+        'capabilities': {'mcp_tools': {}, 'automatic_skill_context': None, 'memory_context': None}}
     try:
         caller = storage.environment_session_id()
         if caller:

@@ -37,14 +37,25 @@ for line in sys.stdin:
     if 'id' not in request:
         continue
     result = {}
-    if method == 'config/read':
+    if method == 'initialize':
+        state['clients'] = state.get('clients', 0) + 1
+        save()
+    elif method == 'config/read':
         effective = json.loads(json.dumps(config))
         if state.get('unexpected_raw'):
             effective.setdefault('mcp_servers', {})['unrelated'] = {'command': 'unrelated'}
+        if state.get('effective_memories'):
+            effective['features']['memories'] = True
         if state.get('effective_hooks'):
             effective['features']['hooks'] = True
         result = {'config': effective}
     elif method == 'thread/turns/list':
+        if state.get('unsupported_initial_history') and state.get('clients') == 1:
+            reject(request, -32601, 'list_turns is not supported yet')
+            continue
+        if state.get('history_error_after_reload') and state.get('clients', 0) > 1:
+            reject(request, -32603, 'history backend unavailable')
+            continue
         if state.get('history_error'):
             reject(request, -32603, 'history backend unavailable')
             continue
@@ -62,6 +73,10 @@ for line in sys.stdin:
         if params.get('includeTurns') and state.get('read_history_error'):
             reject(request, -32603, 'history backend unavailable')
             continue
+        if params.get('includeTurns') and (state.get('unsupported_full_history') or
+                state.get('unsupported_initial_history') and state.get('clients') == 1):
+            reject(request, -32601, 'list_turns is not supported yet')
+            continue
         if (params.get('includeTurns') and state.get('unmaterialized_read')
                 and not state.get('turns')):
             reject(request, -32600, 'thread '+params['threadId']+
@@ -70,6 +85,8 @@ for line in sys.stdin:
         result = {'thread': {'id': thread_id, 'cwd': state['cwd'],
                             'turns': state.get('turns', []) if params.get('includeTurns') else [],
                             'status': {'type': 'active' if state.get('active') else 'idle'}}}
+        if state.get('reloaded_metadata_turns') and state.get('clients', 0) > 1:
+            result['thread']['turns'] = [{'id': 'external-turn', 'status': 'completed'}]
         if not params.get('includeTurns') and state.get('steer_after_metadata'):
             state['turns'] = [{'id': 'external-turn', 'status': 'completed'}]
             save()

@@ -21,6 +21,7 @@ hooks = false
 apps = false
 plugins = false
 skill_search = false
+memories = false
 [skills]
 include_instructions = false
 [mcp_servers.fixture]
@@ -80,7 +81,7 @@ enabled_tools = ["inspect"]
             'output_text': 'result',
             'prompt_sha256': hashlib.sha256(self.pair['brief'].encode()).hexdigest(),
             'capabilities': {'mcp_tools': {'fixture': ['inspect']},
-                             'automatic_skill_context': False}})
+                             'automatic_skill_context': False, 'memory_context': False}})
         saved = json.loads(self.run_tool('partner', 'show', self.pair['id']))
         self.assertEqual(saved['last_run']['turn_id'], first['turn_id'])
         binding = json.loads((self.data/'bindings'/(first['session_id']+'.json')).read_text())
@@ -258,6 +259,29 @@ enabled_tools = ["inspect"]
         self.assertEqual(self.run_pair()['status'], 'attention')
         self.assertNotIn('thread/start', self.methods())
 
+    def test_memory_context_must_be_disabled_in_pinned_and_effective_settings(self):
+        self.repin(self.config.read_text().replace('memories = false', 'memories = true'))
+        self.assertEqual(self.run_pair()['status'], 'attention')
+        self.assertEqual(self.methods(), [])
+        self.repin(self.config.read_text().replace('memories = true', 'memories = false'))
+        self.repin(self.config.read_text().replace('memories = false\n', ''))
+        self.assertEqual(self.run_pair()['status'], 'attention')
+        self.assertEqual(self.methods(), [])
+        self.repin(self.config.read_text().replace('[features]\n', '[features]\nmemories = false\n'))
+        self.native(effective_memories=True)
+        self.assertEqual(self.run_pair()['status'], 'attention')
+        self.assertNotIn('thread/start', self.methods())
+
+    def test_previously_unchecked_memory_context_cannot_resume(self):
+        self.assertEqual(self.run_pair()['status'], 'completed')
+        path = self.data / 'pairs' / (self.pair['id'] + '.json')
+        pair = json.loads(path.read_text())
+        pair['last_run']['capabilities'].pop('memory_context', None)
+        path.write_text(json.dumps(pair))
+        before = len(self.native().get('requests', []))
+        self.assertEqual(self.run_pair()['status'], 'attention')
+        self.assertEqual(len(self.native().get('requests', [])), before)
+
     def test_terminal_native_failure_is_distinct_from_unknown_and_not_replayed(self):
         self.native(failed_turn=True)
         receipt = self.run_pair()
@@ -351,6 +375,61 @@ enabled_tools = ["inspect"]
         self.assertEqual(self.run_pair()['status'], 'attention')
         self.assertNotIn('turn/start', self.methods())
 
+    def test_unsupported_full_history_requires_positive_empty_latest_turn_read(self):
+        self.native(unsupported_full_history=True)
+        self.assertEqual(self.run_pair()['status'], 'completed')
+        self.assertLess(self.methods().index('thread/turns/list'), self.methods().index('turn/start'))
+
+    def test_unsupported_full_history_still_rejects_intervening_steering(self):
+        self.native(unsupported_full_history=True, steer_after_metadata=True)
+        self.assertEqual(self.run_pair()['status'], 'attention')
+        self.assertNotIn('turn/start', self.methods())
+
+    def test_unsupported_full_history_cannot_hide_latest_turn_failure(self):
+        self.native(unsupported_full_history=True, history_error=True)
+        self.assertEqual(self.run_pair()['status'], 'attention')
+        self.assertNotIn('turn/start', self.methods())
+
+    def test_initial_history_adapter_can_reload_the_same_unsubmitted_root_once(self):
+        self.native(unsupported_initial_history=True)
+        self.assertEqual(self.run_pair()['status'], 'completed')
+        self.assertEqual(self.methods().count('thread/start'), 1)
+        self.assertEqual(self.methods().count('thread/resume'), 1)
+        self.assertEqual(self.methods().count('initialize'), 2)
+
+    def test_reloaded_history_error_still_stops_before_assignment(self):
+        self.native(unsupported_initial_history=True, history_error_after_reload=True)
+        self.assertEqual(self.run_pair()['status'], 'attention')
+        self.assertNotIn('turn/start', self.methods())
+        self.assertEqual(self.methods().count('thread/start'), 1)
+
+    def test_reloaded_metadata_history_cannot_be_hidden_by_an_empty_latest_page(self):
+        self.native(unsupported_initial_history=True, reloaded_metadata_turns=True)
+        self.assertEqual(self.run_pair()['status'], 'attention')
+        self.assertNotIn('turn/start', self.methods())
+
+    def test_latest_turn_requires_a_valid_turn_page(self):
+        from types import SimpleNamespace
+
+        import managed_runs
+        for data in ({}, '', None, [{}], ['turn']):
+            with self.subTest(data=data):
+                client = SimpleNamespace(request=lambda *_, value=data: {'data': value, 'nextCursor': None})
+                with self.assertRaises(managed_runs.Attention):
+                    managed_runs.latest_turn(client, 'native-id', time.monotonic()+1)
+        client = SimpleNamespace(request=lambda *_: {'data': [], 'nextCursor': 'unexpected'})
+        with self.assertRaises(managed_runs.Attention):
+            managed_runs.latest_turn(client, 'native-id', time.monotonic()+1)
+
+    def test_unsubmitted_existing_root_resumes_without_full_history_support(self):
+        self.native(unexpected_tool=True)
+        first = self.run_pair()
+        self.native(unexpected_tool=False, unsupported_full_history=True)
+        second = self.run_pair()
+        self.assertEqual(second['status'], 'completed')
+        self.assertEqual(second['session_id'], first['session_id'])
+        self.assertEqual(self.methods().count('thread/start'), 1)
+
     def test_steering_after_fresh_metadata_is_checked_by_the_history_read(self):
         self.native(unmaterialized_read=True, steer_after_metadata=True)
         self.assertEqual(self.run_pair()['status'], 'attention')
@@ -435,5 +514,6 @@ enabled_tools = ["inspect"]
 
     def test_protocol_advertises_host_call_receipts_before_launch(self):
         self.assertEqual(json.loads(self.run_tool('protocol')),
-            {'version':1,'managed_run':{'mcp_call_receipts':'canonical-json-sha256','maximum_mcp_calls':64}})
+        {'version':1,'managed_run':{'mcp_call_receipts':'canonical-json-sha256',
+            'maximum_mcp_calls':64,'memory_context':'disabled-before-first-turn'}})
         self.assertEqual(self.methods(),[])
