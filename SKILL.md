@@ -29,7 +29,9 @@ with the coordinator.
 
 This route owns a background App Server process and validates the profile,
 effective tools and native history directly. It disables command hooks, apps,
-plugins, skill search and automatic skill instructions for that process. Do not
+plugins, skill search, automatic skill instructions and workspace memory for that
+process. Use fresh root sessions, not forks of a broad coordinator or ordinary
+inherited subagents. Mandatory host and project rules still apply. Do not
 install global hooks or use the manual launch helper to enable managed runs.
 Managed execution supports Codex; Claude launch helpers are a separate route.
 
@@ -39,6 +41,9 @@ tools. Terminal or authentication-required states stop before assignment. Profil
 or history drift also stops assignment; retain the existing pair and native ID.
 An `attention` receipt does not prove the first-class session is idle or authorize
 releasing a consumer's native reservations.
+Existing history is retained on resume: workers without a previous checked
+`memory_context: false` receipt cannot resume through this route. Preserve their
+identities and reconcile owned work before preparing a fresh assignment.
 
 ## Creating a partner manually
 

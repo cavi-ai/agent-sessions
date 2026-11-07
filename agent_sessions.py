@@ -1149,7 +1149,8 @@ def _main(argv=None):
     args = parser.parse_args(argv)
 
     if args.command == 'protocol':
-        print(json.dumps({'version':1,'managed_run':{'mcp_call_receipts':'canonical-json-sha256','maximum_mcp_calls':64}}))
+        print(json.dumps({'version':1,'managed_run':{'mcp_call_receipts':'canonical-json-sha256',
+            'maximum_mcp_calls':64,'memory_context':'disabled-before-first-turn'}}))
         return 0
 
     if args.command == 'partner' and args.partner_action == 'run':

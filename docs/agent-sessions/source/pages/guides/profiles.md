@@ -80,7 +80,7 @@ agent-sessions partner show PAIR_ID
 
 `partner run` owns one App Server process and checks the profile directly, without
 command hooks. The pinned Codex profile must disable `features.hooks`,
-`features.apps`, `features.plugins`, `features.skill_search` and
+`features.apps`, `features.plugins`, `features.skill_search`, `features.memories` and
 `skills.include_instructions`. Every enabled MCP server must declare `enabled_tools`.
 Unexpected inherited servers or discovered tools prevent assignment. Model and
 permission settings retain their native configuration behavior.
@@ -99,9 +99,18 @@ The default prompt is the saved pair brief. `--prompt-file` supplies later work
 without changing that brief. It requires a canonical absolute path to a regular
 UTF-8 file, at most 64 KiB. The JSON receipt contains `pair_id`, `session_id`,
 `profile_id`, `turn_id`, `status`, `output_text`, `prompt_sha256` and `capabilities`.
-The capabilities contain checked `mcp_tools` names and `automatic_skill_context:
-false`, which records the required context settings, not a filesystem restriction
-or native asset acceptance. Output text is limited to 64 KiB.
+The capabilities contain checked `mcp_tools` names, `automatic_skill_context:
+false` and `memory_context: false`. Context fields remain null until the effective
+settings pass their checks. They record configuration checks, not inspection of
+the model's full prompt, a filesystem restriction or native asset acceptance.
+Output text is limited to 64 KiB.
+
+Fresh workers start as persistent roots without coordinator history. Supply the
+selected guides and requirements in the bounded prompt rather than loading the
+whole reference library. Mandatory host and applicable project instructions remain
+in force. When changing context controls, audit actual native turn context for
+injected memory summaries, skill catalog entries and unrelated plugin guidance;
+`skills/list` inventory and a config hash alone cannot establish prompt isolation.
 
 Successful later runs resume the same session and reject active or unexpected
 latest turns. `partner show` exposes the saved `last_run` receipt. `completed`
@@ -112,10 +121,26 @@ interrupts only the turn owned by that run and closes its transport. SIGTERM and
 SIGINT use the same cancellation path. Failed or
 unknown runs are retained and are not replayed or replaced by later runs.
 
+Resume also requires the previous receipt's checked `memory_context: false`.
+Disabling memory after a turn does not remove a summary already in its history.
+Older workers without that evidence stop before launch/resume. Preserve their
+identities and reconcile owned work; consumers can retire the old assignment
+and prepare a fresh scoped worker without relabeling the old history as clean.
+
 Fresh idle threads must return explicitly empty history and still be idle with
 empty history after MCP startup. External steering during startup prevents the
 first assignment. An `attention` receipt alone does not prove the session is idle
 or release a consumer's native reservations.
+If full-history reads report the specific unsupported `list_turns` response, the
+runner requires a successful empty `thread/turns/list` result instead. A history
+error is never treated as an empty history. Metadata existence checks do not
+require full-history support.
+If both reads report that specific unsupported response for a newly created
+root, the runner closes its transport and reloads the same bound identity once.
+It repeats configuration, profile, identity, idle-state and MCP checks within the
+original deadline, then requires a valid empty turn page before assignment. It
+does not replace the session or submit work to materialize its history. Other
+history failures stop the run.
 Legacy persistent roots can report the exact native unmaterialized-history error
 before their first user message. Only that response, after a current identity,
 directory and idle-state check, counts as absent history; other read failures stop
