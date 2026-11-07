@@ -92,3 +92,24 @@ See [Worker profiles](../guides/profiles.md) for required files, credential hand
 and the limits of profile checks.
 
 `agent-sessions protocol` reports supported managed receipt contracts without starting a host.
+
+## Resource control
+
+`agent-sessions resource` returns compact JSON without scanning host transcripts
+or receiving peer messages. Its subcommands are `protocol`, `request RESOURCE KEY
+[--seconds N]`, `status TICKET`, `wait TICKET [--seconds N]`, `start TICKET --lease
+TOKEN --fence N`, `cancel TICKET`, `finish TICKET --lease TOKEN --fence N --outcome
+completed|failed|unresolved [--evidence SHA256]`, and `events [--after CURSOR]`.
+`resource --session OWNER` retains a supervised recovery's logical identity.
+
+The API is for resident resource adapters; separate short-lived shell invocations
+are not a native lifecycle supervisor. Admission binds the parent PID and kernel
+birth identity. Wait deadlines are 0.001–3600 seconds; the queue holds at most 256
+pending tickets. A running operation is never expired to free its resource.
+See [queued resources](../guides/resources.md) for lifecycle and recovery rules.
+
+`request` accepts `--resumable`, `--payload-sha256 SHA256` and `--estimate-seconds N`;
+its queue deadline can be up to 86400 seconds. `wait --keep` preserves a queued
+ticket when its wait window ends. `events --lifecycle` includes deduplicated start
+signals as well as terminal events. Status includes UTC timestamps, jobs/sessions
+ahead, estimated wait, its basis and a next-check interval; unknown ETA is explicit.

@@ -27,6 +27,10 @@
           "path": "guides/messaging.md"
         },
         {
+          "title": "Queued resources",
+          "path": "guides/resources.md"
+        },
+        {
           "title": "Hook setup",
           "path": "guides/hooks.md"
         },

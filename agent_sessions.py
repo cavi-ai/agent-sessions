@@ -1071,6 +1071,35 @@ def configure_hooks(host, dry_run=False, remove=False):
     return path, config
 
 
+def resource_parser(sub):
+    resource = sub.add_parser('resource', help='machine-consumed resource admission without peer messages')
+    resource.add_argument('--session', help='logical owner retained by a supervised recovery receipt')
+    actions = resource.add_subparsers(dest='resource_action', required=True)
+    actions.add_parser('protocol')
+    request = actions.add_parser('request')
+    request.add_argument('resource')
+    request.add_argument('key')
+    request.add_argument('--seconds', type=float, default=600)
+    request.add_argument('--estimate-seconds', type=float)
+    request.add_argument('--resumable', action='store_true', help='retain the queued placeholder across process exit')
+    request.add_argument('--payload-sha256', help='bind the request key to exact job inputs')
+    for action in ('status', 'wait', 'start', 'finish', 'cancel'):
+        command = actions.add_parser(action)
+        command.add_argument('ticket')
+        if action == 'wait':
+            command.add_argument('--seconds', type=float, default=600)
+            command.add_argument('--keep', action='store_true', help='return a queued ticket when this wait window ends')
+        if action in ('start', 'finish'):
+            command.add_argument('--lease', required=True)
+            command.add_argument('--fence', required=True, type=int)
+        if action == 'finish':
+            command.add_argument('--outcome', choices=('completed','failed','unresolved'), required=True)
+            command.add_argument('--evidence')
+    events = actions.add_parser('events')
+    events.add_argument('--after', type=int, default=0)
+    events.add_argument('--lifecycle', action='store_true', help='include deduplicated launch-intent start signals')
+
+
 def _main(argv=None):
     parser = argparse.ArgumentParser(prog="agent-sessions", description=__doc__)
     parser.add_argument("--minutes", type=int, default=ACTIVE_MINUTES,
@@ -1146,7 +1175,14 @@ def _main(argv=None):
     running.add_argument('--timeout', type=float, default=60)
     running.add_argument('--prompt-file', help='canonical UTF-8 prompt file, at most 64 KiB')
     running.add_argument('--no-mcp', action='store_true', help='refuse any enabled MCP server')
+    resource_parser(sub)
     args = parser.parse_args(argv)
+
+    if args.command == 'resource':
+        import resource_broker
+        result = resource_broker.dispatch(args, data_dir(), environment_session_id())
+        print(json.dumps(result))
+        return 0
 
     if args.command == 'protocol':
         print(json.dumps({'version':1,'managed_run':{'mcp_call_receipts':'canonical-json-sha256',
