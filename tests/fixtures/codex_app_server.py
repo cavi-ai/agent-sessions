@@ -59,8 +59,20 @@ for line in sys.stdin:
         if state.get('native_absent'):
             reject(request, -32600, 'thread not loaded: '+params['threadId'])
             continue
+        if params.get('includeTurns') and state.get('read_history_error'):
+            reject(request, -32603, 'history backend unavailable')
+            continue
+        if (params.get('includeTurns') and state.get('unmaterialized_read')
+                and not state.get('turns')):
+            reject(request, -32600, 'thread '+params['threadId']+
+                   ' is not materialized yet; includeTurns is unavailable before first user message')
+            continue
         result = {'thread': {'id': thread_id, 'cwd': state['cwd'],
-                            'turns': state.get('turns', []), 'status': {'type': 'idle'}}}
+                            'turns': state.get('turns', []) if params.get('includeTurns') else [],
+                            'status': {'type': 'active' if state.get('active') else 'idle'}}}
+        if not params.get('includeTurns') and state.get('steer_after_metadata'):
+            state['turns'] = [{'id': 'external-turn', 'status': 'completed'}]
+            save()
     elif method in ('thread/start', 'thread/resume'):
         if method == 'thread/start':
             generation = state.get('generation', 0)
@@ -77,12 +89,23 @@ for line in sys.stdin:
                             'status': {'type': 'active' if state.get('active') else 'idle'}}}
     elif method == 'mcpServerStatus/list':
         servers = []
+        states = state.get('mcp_states', ['connected'])
+        connection = states[0]
+        if len(states) > 1:
+            state['mcp_states'] = states[1:]
+        errors = state.get('mcp_tools_errors', [state.get('mcp_tools_error')])
+        tools_error = errors[0]
+        if len(errors) > 1:
+            state['mcp_tools_errors'] = errors[1:]
+        if connection != 'connected' and state.get('steer_during_startup'):
+            state['turns'] = [{'id': 'external-turn', 'status': 'completed'}]
+        save()
         for name, server in config.get('mcp_servers', {}).items():
             if server.get('enabled', True) is False:
                 continue
             tools = server['enabled_tools'] + (['excluded'] if state.get('unexpected_tool') else [])
             servers.append({'name': name, 'tools': {tool: {} for tool in tools},
-                            'runtimeStatus': 'connected', 'toolsError': None})
+                            'runtimeStatus': connection, 'toolsError': tools_error})
         result = {'data': servers, 'nextCursor': None}
     elif method == 'turn/start':
         number = state.get('turn_count', 0) + 1
@@ -110,7 +133,7 @@ for line in sys.stdin:
         state['interrupted'] = params
         save()
     send({'id': request['id'], 'result': result})
-    if method == 'mcpServerStatus/list' and state.get('stall_before_turn'):
+    if method == 'thread/read' and params.get('includeTurns') and state.get('stall_before_turn'):
         time.sleep(5)
 
 state['transport_closed'] = True
