@@ -11,12 +11,14 @@ import os
 import re
 import secrets
 import sqlite3
+import statistics
 import struct
 import subprocess
 import sys
 import time
 import uuid
 from contextlib import closing, contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 
 NAME = re.compile(r'[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}')
@@ -81,10 +83,14 @@ def current_actor(session=None, *, pid=None):
             'pid': pid, 'birth': birth}
 
 
-def bounded_seconds(value):
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not .001 <= value <= 3600:
-        raise ValueError('Wait must be between 0.001 and 3600 seconds')
+def bounded_seconds(value, maximum=3600):
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not .001 <= value <= maximum:
+        raise ValueError('Wait must be between 0.001 and '+str(maximum)+' seconds')
     return float(value)
+
+
+def timestamp(value):
+    return datetime.fromtimestamp(value, timezone.utc).isoformat() if value is not None else None
 
 
 def actor_fields(actor):
@@ -124,6 +130,26 @@ class Broker:
                     UNIQUE(ticket,state));
                 CREATE INDEX IF NOT EXISTS owner_events ON events(owner,cursor);
             ''')
+            # Serialize additive migration with other constructors and active claims.
+            # Existing rows keep NULL times: their original timestamps are unknown.
+            db.execute('BEGIN IMMEDIATE')
+            migrated = False
+            for table, fields in {
+                'tickets': {'created': 'REAL', 'granted': 'REAL', 'started': 'REAL',
+                            'ended': 'REAL', 'estimate': 'REAL', 'resumable': 'INTEGER DEFAULT 0',
+                            'payload': 'TEXT'},
+                'events': {'created': 'REAL', 'fence': 'INTEGER'},
+            }.items():
+                existing = {r[1] for r in db.execute('PRAGMA table_info('+table+')')}
+                for name, kind in fields.items():
+                    if name not in existing:
+                        migrated = True
+                        db.execute('ALTER TABLE '+table+' ADD COLUMN '+name+' '+kind)
+            db.execute('CREATE INDEX IF NOT EXISTS resource_history ON tickets(resource,seq DESC)')
+            if migrated:
+                for resource, fence in db.execute('SELECT resource,max(fence) FROM tickets WHERE fence IS NOT NULL GROUP BY resource').fetchall():
+                    db.execute('INSERT INTO generations VALUES(?,?) ON CONFLICT(resource) DO UPDATE SET fence=max(fence,excluded.fence)', (resource,fence))
+            db.commit()
         self.path.chmod(0o600)
 
     @contextmanager
@@ -143,11 +169,16 @@ class Broker:
             db.close()
 
     def transition(self, db, row, state, reason=None, evidence=None):
+        now = self.clock()
         db.execute('UPDATE tickets SET state=?,reason=?,evidence=? WHERE id=?',
                    (state, reason, evidence, row['id']))
-        if state in (*TERMINAL, 'unresolved'):
-            db.execute('INSERT OR IGNORE INTO events(ticket,owner,state,reason) VALUES(?,?,?,?)',
-                       (row['id'], row['owner'], state, reason))
+        if state == 'running':
+            db.execute('UPDATE tickets SET started=? WHERE id=?', (now, row['id']))
+        elif state in TERMINAL:
+            db.execute('UPDATE tickets SET ended=? WHERE id=?', (now, row['id']))
+        if state in (*TERMINAL, 'unresolved', 'running'):
+            db.execute('INSERT OR IGNORE INTO events(ticket,owner,state,reason,created,fence) VALUES(?,?,?,?,?,?)',
+                       (row['id'], row['owner'], state, reason, now, row['fence']))
 
     def sweep(self, db):
         for row in db.execute("SELECT * FROM tickets WHERE state='queued' AND deadline<=?", (self.clock(),)).fetchall():
@@ -168,7 +199,7 @@ class Broker:
                 continue
             while True:
                 row = db.execute("SELECT * FROM tickets WHERE resource=? AND state='queued' ORDER BY seq LIMIT 1", (resource,)).fetchone()
-                if row is None or alive(row):
+                if row is None or row['resumable'] or alive(row):
                     break
                 self.transition(db, row, 'cancelled', 'owner_exited')
 
@@ -194,26 +225,72 @@ class Broker:
                                         (row['resource'], row['seq'])).fetchone()[0] if row['state']=='queued' else 0
         if row['owner'] == actor['id'] and row['lease']:
             result['lease'] = row['lease']
+        result.update({name+'_at': timestamp(row[column]) for name, column in
+                       (('created','created'), ('granted','granted'), ('started','started'), ('ended','ended'))})
+        result.update(expires_at=timestamp(row['deadline']), queue_sequence=row['seq'],
+                      resumable=bool(row['resumable']), payload_sha256=row['payload'])
+        result.update(self.advice(db, row))
         return result
 
-    def request(self, resource, key, actor, seconds=600):
+    def advice(self, db, row):
+        ahead = db.execute("SELECT * FROM tickets WHERE resource=? AND id!=? AND "
+            "(state IN ('granted','running','unresolved') OR (state='queued' AND seq<?)) ORDER BY seq",
+            (row['resource'], row['id'], row['seq'])).fetchall() if row['state']=='queued' else []
+        history = [r[0] for r in db.execute("SELECT ended-started FROM tickets WHERE resource=? "
+            "AND state IN ('completed','failed') AND evidence IS NOT NULL AND ended>started "
+            "ORDER BY seq DESC LIMIT 20", (row['resource'],))]
+        median = statistics.median(history) if history else None
+        wait, reason = 0.0, None
+        basis = set()
+        for item in ahead:
+            duration = item['estimate'] if item['estimate'] is not None else median
+            if item['state'] == 'unresolved':
+                reason = 'unresolved_holder'
+                break
+            if duration is None or (item['state']=='running' and item['started'] is None):
+                reason = 'duration_unknown'
+                break
+            basis.add('declared' if item['estimate'] is not None else 'recent_median')
+            if item['state'] == 'running':
+                duration -= max(0, self.clock()-item['started'])
+                if duration <= 0:
+                    reason = 'holder_overrun'
+                    break
+            wait += duration
+        wait = None if reason else round(wait, 3)
+        remaining = max(0, row['deadline']-self.clock())
+        retry = min(60 if wait is None else wait, remaining, 300) if row['state']=='queued' else 0
+        return {'jobs_ahead': len(ahead), 'sessions_ahead': len({r['owner'] for r in ahead}),
+                'estimated_wait_seconds': wait, 'estimated_start_at': timestamp(self.clock()+wait) if wait is not None and row['state']=='queued' else None,
+                'estimate_reason': reason, 'estimate_basis': sorted(basis), 'history_samples': len(history),
+                'retry_after_seconds': round(max(0, retry), 3), 'observed_at': timestamp(self.clock())}
+
+    def request(self, resource, key, actor, seconds=600, *, estimate_seconds=None, resumable=False, payload_digest=None):
         actor_fields(actor)
-        seconds = bounded_seconds(seconds)
+        seconds = bounded_seconds(seconds, 86400)
+        if estimate_seconds is not None:
+            estimate_seconds = bounded_seconds(estimate_seconds, 86400)
+        if type(resumable) is not bool or (payload_digest is not None and
+                (not isinstance(payload_digest, str) or not DIGEST.fullmatch(payload_digest))):
+            raise ValueError('Use a boolean resume flag and a SHA256 payload digest')
         if not isinstance(resource, str) or not NAME.fullmatch(resource) or not isinstance(key, str) or not NAME.fullmatch(key):
             raise ValueError('Resource and request key must be bounded identifiers')
         with self.transaction() as db:
             old = db.execute('SELECT * FROM tickets WHERE owner=? AND key=?', (actor['id'], key)).fetchone()
             if old is not None:
-                if (old['resource'], old['seconds'], old['pid'], old['birth']) != (resource, seconds, actor['pid'], actor['birth']):
-                    raise ValueError('Request key already has different resource, deadline or process inputs')
+                if ((old['resource'], old['seconds'], old['estimate'], bool(old['resumable']), old['payload']) !=
+                        (resource, seconds, estimate_seconds, resumable, payload_digest)
+                        or (not resumable and (old['pid'], old['birth']) != (actor['pid'], actor['birth']))):
+                    raise ValueError('Request key already has different resource, deadline, payload or process inputs')
                 return self.view(db, old, actor)
             if self.identity(actor['pid']) != actor['birth']:
                 raise ValueError('Resource owner process changed')
             if db.execute("SELECT count(*) FROM tickets WHERE state='queued'").fetchone()[0] >= 256:
                 raise ValueError('Resource queue is full')
             ticket = uuid.uuid4().hex
-            db.execute('INSERT INTO tickets(id,resource,key,owner,pid,birth,seconds,deadline,state) VALUES(?,?,?,?,?,?,?,?,?)',
-                       (ticket, resource, key, actor['id'], actor['pid'], actor['birth'], seconds, self.clock()+seconds, 'queued'))
+            now = self.clock()
+            db.execute('INSERT INTO tickets(id,resource,key,owner,pid,birth,seconds,deadline,state,created,estimate,resumable,payload) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                       (ticket, resource, key, actor['id'], actor['pid'], actor['birth'], seconds, now+seconds, 'queued', now, estimate_seconds, int(resumable), payload_digest))
             return self.view(db, self.row(db, ticket), actor)
 
     def snapshot(self, ticket, actor):
@@ -224,16 +301,19 @@ class Broker:
     def claim(self, ticket, actor):
         with self.transaction() as db:
             row = self.row(db, ticket)
-            self.authorize(row, actor, process=True)
+            self.authorize(row, actor, process=not bool(row['resumable']))
             if row['state'] != 'queued':
                 return self.view(db, row, actor)
             holder = db.execute("SELECT id FROM tickets WHERE resource=? AND state IN ('granted','running','unresolved')", (row['resource'],)).fetchone()
             first = db.execute("SELECT id FROM tickets WHERE resource=? AND state='queued' ORDER BY seq LIMIT 1", (row['resource'],)).fetchone()
             if holder is None and first['id'] == ticket:
+                if self.identity(actor['pid']) != actor['birth']:
+                    raise ValueError('Resource owner process changed')
                 db.execute('INSERT OR IGNORE INTO generations VALUES(?,0)', (row['resource'],))
                 db.execute('UPDATE generations SET fence=fence+1 WHERE resource=?', (row['resource'],))
                 fence = db.execute('SELECT fence FROM generations WHERE resource=?', (row['resource'],)).fetchone()[0]
-                db.execute("UPDATE tickets SET state='granted',lease=?,fence=? WHERE id=?", (secrets.token_hex(32), fence, ticket))
+                db.execute("UPDATE tickets SET state='granted',lease=?,fence=?,pid=?,birth=?,granted=? WHERE id=?",
+                           (secrets.token_hex(32), fence, actor['pid'], actor['birth'], self.clock(), ticket))
             return self.view(db, self.row(db, ticket), actor)
 
     def check_lease(self, lease, fence):
@@ -245,10 +325,12 @@ class Broker:
         with self.transaction() as db:
             row = self.row(db, ticket)
             self.authorize(row, actor, lease, fence, process=True)
+            if row['state'] == 'running':
+                return {**self.view(db, row, actor), 'launch_permitted':False}
             if row['state'] != 'granted':
                 raise ValueError('Launch requires a current resource grant')
             self.transition(db, row, 'running')
-            return self.view(db, self.row(db, ticket), actor)
+            return {**self.view(db, self.row(db, ticket), actor), 'launch_permitted':True}
 
     def finish(self, ticket, actor, lease, fence, outcome, evidence=None):
         self.check_lease(lease, fence)
@@ -271,14 +353,14 @@ class Broker:
     def cancel(self, ticket, actor):
         with self.transaction() as db:
             row = self.row(db, ticket)
-            self.authorize(row, actor, process=True)
+            self.authorize(row, actor, process=not (row['resumable'] and row['state']=='queued'))
             if row['state'] in ('queued', 'granted'):
                 self.transition(db, row, 'cancelled', 'owner_cancelled')
             elif row['state'] not in TERMINAL:
                 raise ValueError('A launch intent requires supervised cleanup before release')
             return self.view(db, self.row(db, ticket), actor)
 
-    def wait(self, ticket, actor, seconds=600):
+    def wait(self, ticket, actor, seconds=600, *, keep=False):
         deadline = time.monotonic()+bounded_seconds(seconds)
         try:
             while True:
@@ -287,35 +369,43 @@ class Broker:
                     return state
                 remaining = deadline-time.monotonic()
                 if remaining <= 0:
-                    return self.cancel(ticket, actor)
+                    return state if keep else self.cancel(ticket, actor)
                 time.sleep(min(.2, remaining))
         except BaseException:
-            self.cancel(ticket, actor)
+            if not keep:
+                self.cancel(ticket, actor)
             raise
 
-    def events(self, actor, after=0):
+    def events(self, actor, after=0, *, lifecycle=False):
         actor_fields(actor)
         if type(after) is not int or after < 0:
             raise ValueError('Event cursor must be a nonnegative integer')
         with self.transaction() as db:
-            return [dict(row) for row in db.execute('SELECT cursor,ticket,state,reason FROM events WHERE owner=? AND cursor>? ORDER BY cursor LIMIT 64', (actor['id'], after))]
+            terminal = '' if lifecycle else " AND state!='running'"
+            result = [dict(row) for row in db.execute('SELECT cursor,ticket,state,reason,created,fence FROM events WHERE owner=? AND cursor>?'+terminal+' ORDER BY cursor LIMIT 64', (actor['id'], after))]
+            for row in result:
+                row['created_at'] = timestamp(row.pop('created'))
+                row['signal'] = 'start' if row['state']=='running' else 'attention' if row['state']=='unresolved' else 'end'
+            return result
 
 
 
 def dispatch(args, root, session):
     if args.resource_action == 'protocol':
-        return {'version': 1, 'admission': 'fifo-exclusive', 'notifications': 'owner-terminal-events'}
+        return {'version': 1, 'admission': 'fifo-exclusive', 'notifications': 'owner-terminal-events',
+                'capabilities': ['queue-advice', 'resumable-tickets', 'payload-idempotency', 'lifecycle-events', 'one-shot-start']}
     actor = current_actor(args.session or session)
     broker = Broker(root)
     action = args.resource_action
     if action == 'request':
-        return broker.request(args.resource, args.key, actor, args.seconds)
+        return broker.request(args.resource, args.key, actor, args.seconds, estimate_seconds=args.estimate_seconds,
+                              resumable=args.resumable, payload_digest=args.payload_sha256)
     if action == 'events':
-        return broker.events(actor, args.after)
+        return broker.events(actor, args.after, lifecycle=args.lifecycle)
     if action == 'status':
         return broker.snapshot(args.ticket, actor)
     if action == 'wait':
-        return broker.wait(args.ticket, actor, args.seconds)
+        return broker.wait(args.ticket, actor, args.seconds, keep=args.keep)
     if action == 'cancel':
         return broker.cancel(args.ticket, actor)
     if action == 'start':

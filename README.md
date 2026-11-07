@@ -76,6 +76,9 @@ host-local FIFO tickets for native supervisors. Waiting, admission and release
 are machine-consumed state; peer messages remain for decisions and handoffs.
 The broker preserves unresolved native outcomes and exposes scoped terminal
 events without starting model turns. It adds no background service or MCP server.
+Timestamped tickets expose queue position and estimated wait. Resumable
+checkpoints survive compaction; the packaged Python client and
+[example adapter](examples/shared_resource.py) show the supervising lifecycle.
 
 ## Documentation
 

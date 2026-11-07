@@ -1080,11 +1080,15 @@ def resource_parser(sub):
     request.add_argument('resource')
     request.add_argument('key')
     request.add_argument('--seconds', type=float, default=600)
+    request.add_argument('--estimate-seconds', type=float)
+    request.add_argument('--resumable', action='store_true', help='retain the queued placeholder across process exit')
+    request.add_argument('--payload-sha256', help='bind the request key to exact job inputs')
     for action in ('status', 'wait', 'start', 'finish', 'cancel'):
         command = actions.add_parser(action)
         command.add_argument('ticket')
         if action == 'wait':
             command.add_argument('--seconds', type=float, default=600)
+            command.add_argument('--keep', action='store_true', help='return a queued ticket when this wait window ends')
         if action in ('start', 'finish'):
             command.add_argument('--lease', required=True)
             command.add_argument('--fence', required=True, type=int)
@@ -1093,6 +1097,7 @@ def resource_parser(sub):
             command.add_argument('--evidence')
     events = actions.add_parser('events')
     events.add_argument('--after', type=int, default=0)
+    events.add_argument('--lifecycle', action='store_true', help='include deduplicated launch-intent start signals')
 
 
 def _main(argv=None):

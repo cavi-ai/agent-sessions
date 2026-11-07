@@ -31,6 +31,12 @@ request identity, FIFO admission, lease generations and scoped terminal events.
 Use peer messages for an actual decision or necessary source-ownership handoff.
 Do not turn resource bookkeeping or acknowledgements into model turns.
 
+Keep the token-free checkpoint across compaction. Use the broker's queue position,
+ETA and retry-after guidance, then recheck the same ticket on waking. Only the
+resident supervisor acquires and starts a grant. Resumable queued tickets survive
+requester exit; running leases retain process identity. Start/end cursor signals
+are machine state, never a reason to send availability messages to other agents.
+
 ## Managed Codex assignments
 
 For a requested managed task, pin the worker directory's `.codex/config.toml`

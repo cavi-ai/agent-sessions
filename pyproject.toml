@@ -26,7 +26,7 @@ agent-sessions = "agent_sessions:main"
 dev = ["ruff>=0.14,<1", "build>=1.2,<2"]
 
 [tool.setuptools]
-py-modules = ["agent_sessions", "session_profiles", "managed_runs", "resource_broker"]
+py-modules = ["agent_sessions", "session_profiles", "managed_runs", "resource_broker", "resource_client"]
 
 [tool.ruff]
 line-length = 100

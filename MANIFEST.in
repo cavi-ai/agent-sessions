@@ -2,3 +2,4 @@ include SKILL.md CONTRIBUTING.md SECURITY.md
 recursive-include docs/agent-sessions/source *.md *.json
 recursive-include scripts/docs *.py
 include scripts/__init__.py
+recursive-include examples *.py
