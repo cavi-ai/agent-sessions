@@ -36,8 +36,8 @@ message contents and account information that are not needed to explain the issu
 
 Use [GitHub issues](https://github.com/cavi-ai/agent-sessions/issues) for ordinary
 bugs. Report vulnerabilities privately through the
-[security policy](https://github.com/cavi-ai/agent-sessions/blob/{{RELEASE_TAG}}/SECURITY.md).
+[security policy](https://github.com/cavi-ai/agent-sessions/blob/main/SECURITY.md).
 
 ## License
 
-MIT. See [LICENSE](https://github.com/cavi-ai/agent-sessions/blob/{{RELEASE_TAG}}/LICENSE).
+MIT. See [LICENSE](https://github.com/cavi-ai/agent-sessions/blob/main/LICENSE).

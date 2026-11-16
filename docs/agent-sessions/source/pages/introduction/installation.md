@@ -14,7 +14,7 @@ The CLI does not install the hosts or sign in to their accounts.
 Use [uv](https://docs.astral.sh/uv/) to keep the CLI in its own environment:
 
 ```sh
-uv tool install git+https://github.com/cavi-ai/agent-sessions.git@{{RELEASE_TAG}}
+uv tool install git+https://github.com/cavi-ai/agent-sessions.git@v0.2.0
 agent-sessions --help
 ```
 
@@ -25,7 +25,7 @@ The package is installed from GitHub. These instructions do not require a PyPI r
 ```sh
 python3 -m venv .venv
 . .venv/bin/activate
-python -m pip install git+https://github.com/cavi-ai/agent-sessions.git@{{RELEASE_TAG}}
+python -m pip install git+https://github.com/cavi-ai/agent-sessions.git@v0.2.0
 agent-sessions --help
 ```
 
@@ -42,7 +42,7 @@ python -m pip install -e '.[dev]'
 ```
 
 You can also run `python3 agent_sessions.py` from the checkout once its dependencies
-are installed. See [Contributing](https://github.com/cavi-ai/agent-sessions/blob/{{RELEASE_TAG}}/CONTRIBUTING.md)
+are installed. See [Contributing](https://github.com/cavi-ai/agent-sessions/blob/main/CONTRIBUTING.md)
 for development checks.
 
 ## Update or remove
