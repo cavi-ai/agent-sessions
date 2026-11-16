@@ -1,15 +1,67 @@
 # Agent Sessions
 
+[![Release](https://img.shields.io/github/v/release/cavi-ai/agent-sessions)](https://github.com/cavi-ai/agent-sessions/releases/latest)
+[![Release asset downloads, all time](https://img.shields.io/github/downloads/cavi-ai/agent-sessions/total?label=release%20assets%20total)](https://github.com/cavi-ai/agent-sessions/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-See which Codex and Claude Code sessions share a repository, send work to a peer,
-and claim messages before acting on them. Partner records connect sessions across
-both hosts; optional profiles preserve a worker's native configuration on resume.
+![Fan out the work. Not the baggage. Five raccoon specialists travel with compact kits beside an impossibly overloaded luggage cart. Five-start projection: 175,285 to 86,325 startup input tokens.](assets/agent-sessions-hero.png)
 
-Discovery and messaging run locally. Session titles, project paths and queued
-messages stay in local storage until a host passes message context to its model.
+Build complex workflows around specialized agents. Give each worker a focused
+brief and its relevant tools, coordinate through queued handoffs, and bring
+useful results back to the main session.
 
-## Install
+[Get started](#get-started) · [Worker profiles](docs/agent-sessions/source/pages/guides/profiles.md) · [Integration guides](#use-your-existing-harness)
+
+## A leaner start for your team
+
+Copying a broad setup into every worker spends tokens before the work begins.
+Agent Sessions lets you prepare separate workers with pinned configuration and
+selected tools, then reuse those sessions for later assignments.
+
+| Startup input tokens | Regular startup | Agent Sessions scoped startup |
+| --- | ---: | ---: |
+| One measured start | 35,057 | 17,265 |
+| Five-start projection | 175,285 | 86,325 |
+
+**88,960 fewer startup input tokens in the five-start projection: a 51% reduction
+in this reference setup.**
+
+<details>
+<summary>Startup measurement</summary>
+
+Measured November 16, 2026, using this [source snapshot](https://github.com/cavi-ai/agent-sessions/tree/362793c988f044d452359260c94aa51fa141a8df) and native CLI 0.166.0.
+One startup per configuration used the same model, working directory and
+one-word-response prompt, with native startup defaults retained. Both returned
+`READY` and made no tool calls.
+
+The regular configuration enabled five MCP servers. The scoped starter profile
+disabled optional MCP servers and automatic skill/memory context while retaining
+mandatory host and project instructions. Input counts include cached input.
+The five-start figures are five times each observed startup input count.
+
+</details>
+
+## Build the workflow around the work
+
+- **Give specialists a stable scope.** Pin a worker's directory, native settings
+  and selected configuration files. Guarded launch and resume check those files
+  before continuing. Managed runs also verify the effective MCP tool inventory
+  before assigning work.
+- **Keep the main session focused.** Fresh managed workers start without the
+  coordinator's conversation history. Detailed execution lives in the worker;
+  the coordinator can collect its result and send a focused follow-up.
+- **Make handoffs deliberate.** Durable messages wait in a queue. An atomic claim
+  records who took the job and replies to the sender. Sending a message does not
+  itself interrupt a session or start a model turn.
+- **Queue shared resources.** Participating native supervisors take FIFO tickets,
+  inspect queue position and wait estimates, and resume from saved checkpoints.
+  Queue bookkeeping runs without model turns; supervisors own execution and
+  cleanup.
+- **Keep the worker you prepared.** Partner records retain native session
+  identities across follow-ups. Managed receipts record the turn, status and
+  result, with bounded MCP call hashes when tools are used.
+
+## Get started
 
 Requires Python 3.9+, Git, and macOS or Linux.
 
@@ -17,97 +69,61 @@ Requires Python 3.9+, Git, and macOS or Linux.
 uv tool install git+https://github.com/cavi-ai/agent-sessions.git
 ```
 
-For a virtual environment, a source checkout, or upgrading an existing install,
-see [Installation](docs/agent-sessions/source/pages/introduction/installation.md).
+Give your coordinator the [worker-profile guide](docs/agent-sessions/source/pages/guides/profiles.md)
+and a bounded assignment:
 
-## Quickstart
+> Prepare specialists for research, implementation and review. Give each only
+> the brief and tools its stage needs. Queue the handoffs, collect one useful
+> result per stage, and keep detailed execution in the worker sessions.
 
-Find the sessions in your repository:
+Use the [partner guide](docs/agent-sessions/source/pages/guides/partners.md) to
+connect existing workers or prepare new ones. For shared native resources,
+integrate the [resource client](docs/agent-sessions/source/pages/guides/resources.md)
+with your supervising harness.
 
-```sh
-agent-sessions list
-agent-sessions who .
-```
+[Installation and upgrades](docs/agent-sessions/source/pages/introduction/installation.md) ·
+[Complete quickstart](docs/agent-sessions/source/pages/introduction/quickstart.md)
 
-Copy a recipient's session ID from the output, replacing `SESSION_ID` below:
+## Use your existing harness
 
-```sh
-agent-sessions send SESSION_ID 'Review the parser and report the edge cases'
-```
+Agent Sessions provides a local CLI and a packaged Python resource client.
+Keep your coordinator and native agent tools; use the session records, profiles
+and queues where your workflow needs them.
 
-In the receiving session, read the queue and replace `MESSAGE_ID` with the ID shown:
+| Surface | Current support |
+| --- | --- |
+| Native sessions | Codex and Claude Code discovery, messaging and partner records |
+| Profiled workers | Pinned configuration with guarded launch and resume for both hosts |
+| Managed turns | Codex App Server execution, scope checks and saved run receipts |
+| Supervising harnesses | CLI contracts and `resource_client.ResourceClient` for resource admission, lifecycle events and checkpoint/resume |
 
-```sh
-agent-sessions inbox
-agent-sessions claim MESSAGE_ID 'ready, reviewing the parser'
-```
+Optional [host hooks](docs/agent-sessions/source/pages/guides/hooks.md) deliver
+queued messages at supported checkpoints. Managed turns check configuration
+directly and use their own launch path.
 
-A claim reserves the message for one session and replies to the sender. A directory
-can also be the recipient: the message waits for sessions under that path until
-one claims it. Reading a message alone does not reserve it.
+## Access and data
 
-## Optional automatic delivery
+Discovery and messaging run locally. Session titles, project paths and queued
+messages stay in local storage until a host passes message context to its model.
+Native permission settings remain in force. Worker profiles verify pinned files
+and launch context.
 
-For automatic queued-message delivery, register hooks for the hosts you use:
+[Security model](docs/agent-sessions/source/pages/security/model.md) ·
+[Worker configuration](docs/agent-sessions/source/pages/guides/profiles.md)
 
-```sh
-agent-sessions configure codex
-agent-sessions configure claude
-```
+## Documentation and help
 
-Existing settings and other hooks are preserved. Review and trust the Codex hooks
-in `/hooks` or Settings > Hooks. Sending does not interrupt a session or start a
-turn; messages arrive at the next supported hook or explicit `inbox` call.
+[Full documentation](https://cavi-ai.xyz/docs/agent-sessions) ·
+[Overview](docs/agent-sessions/source/pages/introduction/overview.md)
 
-See [Hook setup](docs/agent-sessions/source/pages/guides/hooks.md) for previews,
-trust review, updates and removal.
-
-Managed Codex `partner run` validates its pinned configuration, effective tools
-and history directly. Workers disable apps, plugins, hooks, automatic skills and
-workspace memory, and start without inherited coordinator turns. Mandatory host
-and project instructions remain applicable. These checks establish context and
-tool scope, not a filesystem sandbox. It requires no global hook installation; see
-[managed worker profiles](docs/agent-sessions/source/pages/guides/profiles.md#run-a-managed-codex-turn).
-
-## Resource admission
-
-The [resource broker](docs/agent-sessions/source/pages/guides/resources.md) provides
-host-local FIFO tickets for native supervisors. Waiting, admission and release
-are machine-consumed state; peer messages remain for decisions and handoffs.
-The broker preserves unresolved native outcomes and exposes scoped terminal
-events without starting model turns. It adds no background service or MCP server.
-Timestamped tickets expose queue position and estimated wait. Resumable
-checkpoints survive compaction; the packaged Python client and
-[example adapter](examples/shared_resource.py) show the supervising lifecycle.
-
-## Documentation
-
-Read the guides at [cavi-ai.xyz/docs/agent-sessions](https://cavi-ai.xyz/docs/agent-sessions).
-The source pages are linked below.
-
-Start with the [overview](docs/agent-sessions/source/pages/introduction/overview.md)
-or follow the [complete quickstart](docs/agent-sessions/source/pages/introduction/quickstart.md).
-
-- [Messaging and claims](docs/agent-sessions/source/pages/guides/messaging.md):
-  recipients, delivery, ownership and replies.
-- [Partner sessions](docs/agent-sessions/source/pages/guides/partners.md):
-  create or attach Codex and Claude partners, including multiple partners.
-- [Worker profiles](docs/agent-sessions/source/pages/guides/profiles.md):
-  pin configuration, launch a worker and resume the same session.
-- [Troubleshooting](docs/agent-sessions/source/pages/guides/troubleshooting.md):
-  resolve missing messages, launch failures and profile mismatches.
-- [CLI reference](docs/agent-sessions/source/pages/reference/cli.md) and
-  [configuration](docs/agent-sessions/source/pages/reference/configuration.md).
-- [Security model](docs/agent-sessions/source/pages/security/model.md) and
-  [version and support](docs/agent-sessions/source/pages/release/version-and-support.md).
-
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and checks.
-
-## Security
-
-Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md).
+- [Messaging and claims](docs/agent-sessions/source/pages/guides/messaging.md)
+- [Partner sessions](docs/agent-sessions/source/pages/guides/partners.md)
+- [Worker profiles](docs/agent-sessions/source/pages/guides/profiles.md)
+- [Resource queues and Python integration](docs/agent-sessions/source/pages/guides/resources.md)
+- [CLI reference](docs/agent-sessions/source/pages/reference/cli.md) and [configuration](docs/agent-sessions/source/pages/reference/configuration.md)
+- [Troubleshooting](docs/agent-sessions/source/pages/guides/troubleshooting.md)
+- [Version and support](docs/agent-sessions/source/pages/release/version-and-support.md)
+- [Report an issue](https://github.com/cavi-ai/agent-sessions/issues) or [contribute](CONTRIBUTING.md)
 
 ## License
 
