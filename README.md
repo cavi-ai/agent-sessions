@@ -113,7 +113,7 @@ and launch context.
 
 ## Documentation and help
 
-[Full documentation](https://cavi-ai.xyz/docs/agent-sessions) ·
+[Full documentation](https://github.com/cavi-ai/agent-sessions/tree/main/docs/agent-sessions/source/pages) ·
 [Overview](docs/agent-sessions/source/pages/introduction/overview.md)
 
 - [Messaging and claims](docs/agent-sessions/source/pages/guides/messaging.md)
