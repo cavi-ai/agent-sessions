@@ -57,6 +57,6 @@ environment-variable references instead; their values are not expanded into argv
 ## Report a vulnerability
 
 Follow the private reporting instructions in
-[SECURITY.md](https://github.com/cavi-ai/agent-sessions/blob/feat/sessions/SECURITY.md).
+[SECURITY.md](https://github.com/cavi-ai/agent-sessions/blob/{{RELEASE_TAG}}/SECURITY.md).
 Use synthetic data for reproductions. Do not post actual queues, host transcripts,
 credentials or personal paths in a public issue.

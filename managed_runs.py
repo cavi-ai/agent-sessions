@@ -184,7 +184,7 @@ def latest_turn(client, session_id, deadline):
 def configured_client(profile, overrides, expected, deadline):
     client = Rpc(profile, overrides)
     try:
-        client.request('initialize', {'clientInfo': {'name': 'agent-sessions', 'version': '0.1.0'},
+        client.request('initialize', {'clientInfo': {'name': 'agent-sessions', 'version': '0.2.0'},
                                       'capabilities': {'experimentalApi': True}}, deadline)
         client.send({'method': 'initialized', 'params': {}}, deadline)
         effective = client.request('config/read', {'cwd': profile['cwd'],
