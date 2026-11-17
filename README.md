@@ -68,6 +68,8 @@ Requires Python 3.9+, Git, and macOS or Linux.
 uv tool install git+https://github.com/cavi-ai/agent-sessions.git
 ```
 
+Install the Agent Sessions plugin from the Cavi marketplace for Claude Code or Codex to make its coordination skill available. The plugin requires the CLI above; it does not install hooks. See [plugin installation](docs/agent-sessions/source/pages/introduction/installation.md#install-the-plugin) for commands and optional hook setup.
+
 Give your coordinator the [worker-profile guide](docs/agent-sessions/source/pages/guides/profiles.md)
 and a bounded assignment:
 
