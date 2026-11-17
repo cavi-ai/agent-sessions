@@ -1,7 +1,6 @@
 # Agent Sessions
 
 [![Release](https://img.shields.io/github/v/release/cavi-ai/agent-sessions)](https://github.com/cavi-ai/agent-sessions/releases/latest)
-[![Release asset downloads, all time](https://img.shields.io/github/downloads/cavi-ai/agent-sessions/total?label=release%20assets%20total)](https://github.com/cavi-ai/agent-sessions/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 ![Fan out the work. Not the baggage. Five raccoon specialists travel with compact kits beside an impossibly overloaded luggage cart. Five-start projection: 175,285 to 86,325 startup input tokens.](assets/agent-sessions-hero.png)
