@@ -31,6 +31,17 @@ agent-sessions --help
 
 Use the installed CLI from the same environment when configuring hooks.
 
+## Install the plugin
+
+After installing the CLI and adding the Cavi marketplace to your host, install the skill for the host you use:
+
+```sh
+claude plugin install agent-sessions@cavi-ai
+codex plugin add agent-sessions@cavi-ai
+```
+
+Use the command for your host; the CLI must be available on its `PATH`. The plugin does not install hooks. For automatic message delivery, review the [hook guide](../guides/hooks.md) and run the host-specific `configure` command yourself. Codex requires its native hook trust review.
+
 ## Work from a checkout
 
 ```sh

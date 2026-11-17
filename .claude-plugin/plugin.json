@@ -1,0 +1,16 @@
+{
+  "name": "agent-sessions",
+  "version": "0.2.0",
+  "description": "Coordinate local agent sessions with scoped workers and queued handoffs.",
+  "author": {
+    "name": "CAVI AI"
+  },
+  "homepage": "https://github.com/cavi-ai/agent-sessions",
+  "repository": "https://github.com/cavi-ai/agent-sessions",
+  "license": "MIT",
+  "keywords": [
+    "agent-sessions",
+    "coordination",
+    "cli"
+  ]
+}

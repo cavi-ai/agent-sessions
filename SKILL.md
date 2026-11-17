@@ -5,8 +5,8 @@ description: Use before changing a repository that another Claude or Codex sessi
 
 # agent-sessions
 
-From a source checkout, run `python3 <this folder>/agent_sessions.py`. With the
-Python package installed, use `agent-sessions` for the same commands.
+Install the Agent Sessions CLI separately and use `agent-sessions` for these commands.
+See the [installation guide](https://github.com/cavi-ai/agent-sessions/blob/main/docs/agent-sessions/source/pages/introduction/installation.md).
 
 - At the start of a coordinated turn, run `agent-sessions inbox` before other work.
   Automatic delivery depends on the host invoking its hooks.
@@ -26,7 +26,7 @@ Unity slot. Resource tickets are separate from message claims. The supervisor
 waits internally, retains its native memory/project/process checks and releases
 only from verified cleanup evidence. Unknown outcomes keep the reservation.
 
-Read [queued resources](docs/agent-sessions/source/pages/guides/resources.md) for
+Read [queued resources](https://github.com/cavi-ai/agent-sessions/blob/main/docs/agent-sessions/source/pages/guides/resources.md) for
 request identity, FIFO admission, lease generations and scoped terminal events.
 Use peer messages for an actual decision or necessary source-ownership handoff.
 Do not turn resource bookkeeping or acknowledgements into model turns.

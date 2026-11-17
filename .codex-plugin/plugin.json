@@ -1,0 +1,32 @@
+{
+  "name": "agent-sessions",
+  "version": "0.2.0",
+  "description": "Coordinate local agent sessions with scoped workers and queued handoffs.",
+  "author": {
+    "name": "CAVI AI"
+  },
+  "homepage": "https://github.com/cavi-ai/agent-sessions",
+  "repository": "https://github.com/cavi-ai/agent-sessions",
+  "license": "MIT",
+  "keywords": [
+    "agent-sessions",
+    "coordination",
+    "cli"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Agent Sessions",
+    "shortDescription": "Coordinate local agent sessions.",
+    "longDescription": "Prepare scoped workers and coordinate queued handoffs through the Agent Sessions CLI.",
+    "developerName": "CAVI AI",
+    "category": "Productivity",
+    "capabilities": [
+      "Write"
+    ],
+    "websiteURL": "https://github.com/cavi-ai/agent-sessions",
+    "defaultPrompt": [
+      "Find active sessions in this repository.",
+      "Prepare a scoped worker for this task."
+    ]
+  }
+}
