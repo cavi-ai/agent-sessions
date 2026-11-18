@@ -174,8 +174,8 @@ def _toml(value):
     return json.dumps(value, ensure_ascii=False, allow_nan=False)
 
 
-def codex_overrides(profile):
-    """Repeat only capability settings at the native process override layer."""
+def pinned_codex_config(profile):
+    """Read the exact pinned native configuration."""
     root = Path(profile['cwd'])
     try:
         with (root/'.codex/config.toml').open('rb') as stream:
@@ -184,6 +184,15 @@ def codex_overrides(profile):
         if len(raw) > LIMIT or hashlib.sha256(raw).hexdigest() != expected['sha256']:
             raise ProfileError('profile configuration changed before launch')
         config = tomllib.loads(raw.decode('utf-8'))
+        return config
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise ProfileError(f'cannot load pinned capability TOML: {exc}') from exc
+
+
+def codex_overrides(profile):
+    """Repeat only capability settings at the native process override layer."""
+    try:
+        config = pinned_codex_config(profile)
         servers = config.get('mcp_servers', {})
         if not isinstance(servers, dict) or any(not isinstance(v, dict) for v in servers.values()):
             raise ProfileError('MCP settings must contain server tables')

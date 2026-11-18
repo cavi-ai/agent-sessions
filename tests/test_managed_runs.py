@@ -73,6 +73,106 @@ enabled_tools = ["inspect"]
             'Inspect the selected artifact', '--profile', self.profile['id'],
             '--session', 'codex-main-0001'))
 
+    def local_config(self, extra=''):
+        return '''model = "local-model"
+model_provider = "local"
+[model_providers.local]
+name = "Local"
+base_url = "http://127.0.0.1:8095/v1"
+env_key = "LOCAL_GATEWAY_KEY"
+wire_api = "responses"
+''' + extra + '''
+[features]
+hooks = false
+apps = false
+plugins = false
+skill_search = false
+memories = false
+[skills]
+include_instructions = false
+[mcp_servers.fixture]
+command = "fixture"
+enabled_tools = ["inspect"]
+'''
+
+    def run_local(self):
+        self.env['LOCAL_GATEWAY_KEY'] = 'local-test-key'
+        result = subprocess.run([sys.executable, str(TOOL), 'partner', 'run', self.pair['id'],
+                                 '--timeout', '5', '--local-provider'], env=self.env,
+                                capture_output=True, text=True, timeout=15)
+        return json.loads(result.stdout)
+
+    def test_local_provider_config_checked_and_persisted_for_resume(self):
+        self.repin(self.local_config())
+        self.native(local_native_defaults=True)
+        first = self.run_local()
+        self.assertEqual(first['status'], 'completed')
+        requests = self.native()['requests']
+        self.assertLess(next(i for i,r in enumerate(requests) if r['method']=='config/read'),
+                        next(i for i,r in enumerate(requests) if r['method']=='turn/start'))
+        for r in requests:
+            if r['method'] in ('thread/start','turn/start'):
+                self.assertEqual(r['params']['model'], 'local-model')
+        self.assertEqual(self.run_local()['status'], 'completed')
+        self.assertEqual(self.run_pair()['status'], 'attention')
+
+    def test_local_refusal_preserves_last_run_for_retry(self):
+        self.repin(self.local_config())
+        first = self.run_local()
+        self.assertEqual(first['status'], 'completed')
+        before = json.loads(self.run_tool('partner', 'show', self.pair['id']))['last_run']
+        self.assertEqual(self.run_pair()['status'], 'attention')
+        self.assertEqual(json.loads(self.run_tool('partner', 'show', self.pair['id']))['last_run'], before)
+        self.env.pop('LOCAL_GATEWAY_KEY')
+        result = subprocess.run([sys.executable, str(TOOL), 'partner', 'run', self.pair['id'],
+                                 '--timeout', '5', '--local-provider'], env=self.env,
+                                capture_output=True, text=True, timeout=15)
+        self.assertEqual(json.loads(result.stdout)['status'], 'attention')
+        self.assertEqual(json.loads(self.run_tool('partner', 'show', self.pair['id']))['last_run'], before)
+        self.assertEqual(self.run_local()['status'], 'completed')
+
+    def test_local_effective_drift_stops_before_assignment(self):
+        for drift in ('model','provider','origin','auth_store','auth_extra'):
+            with self.subTest(drift=drift):
+                self.repin(self.local_config())
+                self.rpc_state.write_text(json.dumps({'cwd': str(self.worktree), 'local_drift': drift}))
+                self.assertEqual(self.run_local()['status'], 'attention')
+                self.assertNotIn('thread/start', self.methods())
+
+    def test_local_thread_provider_mismatch_stops_turn(self):
+        self.repin(self.local_config())
+        self.native(thread_provider='other')
+        self.assertNotEqual(self.run_local()['status'], 'completed')
+        self.assertNotIn('turn/start', self.methods())
+
+    def test_local_rejects_unsafe_provider_settings_before_launch(self):
+        for extra in ('http_headers = { Authorization = "secret" }\n',
+                      'query_params = { key = "secret" }\n',
+                      'requires_openai_auth = true\n',
+                      'supports_websockets = true\n'):
+            with self.subTest(extra=extra):
+                self.repin(self.local_config(extra))
+                self.rpc_state.write_text(json.dumps({'cwd':str(self.worktree)}))
+                self.assertEqual(self.run_local()['status'], 'attention')
+                self.assertNotIn('initialize', self.methods())
+
+    def test_local_rejects_non_loopback_or_credential_url(self):
+        for url in ('https://127.0.0.1:8095/v1', 'http://localhost:8095/v1',
+                    'http://127.0.0.2:8095/v1', 'http://user:pass@127.0.0.1:8095/v1',
+                    'http://127.0.0.1:8095/v1?key=secret', 'http://127.0.0.1:8095/../v1',
+                    'http://127.0.0.1:8095/./v1'):
+            with self.subTest(url=url):
+                self.repin(self.local_config().replace('http://127.0.0.1:8095/v1',url))
+                self.rpc_state.write_text(json.dumps({'cwd':str(self.worktree)}))
+                self.assertEqual(self.run_local()['status'], 'attention')
+                self.assertNotIn('initialize', self.methods())
+
+    def test_local_rejects_model_control_characters(self):
+        self.repin(self.local_config().replace('local-model', 'local\\nmodel'))
+        self.rpc_state.write_text(json.dumps({'cwd': str(self.worktree)}))
+        self.assertEqual(self.run_local()['status'], 'attention')
+        self.assertNotIn('initialize', self.methods())
+
     def test_completed_run_reuses_identity_and_records_receipt_without_hooks(self):
         first = self.run_pair()
         self.assertEqual(first, {'pair_id': self.pair['id'],

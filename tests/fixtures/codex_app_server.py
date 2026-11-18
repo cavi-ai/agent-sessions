@@ -48,6 +48,15 @@ for line in sys.stdin:
             effective['features']['memories'] = True
         if state.get('effective_hooks'):
             effective['features']['hooks'] = True
+        if state.get('local_native_defaults'):
+            effective['model_providers'][effective['model_provider']].update(model_catalog_url=None, experimental_bearer_token=None, auth=None, http_headers=None, supports_standalone_web_search=False)
+        if state.get('local_drift'):
+            drift = state['local_drift']
+            if drift == 'origin': effective['model_providers'][effective['model_provider']]['base_url'] = 'http://127.0.0.1:1/v1'
+            elif drift == 'auth_extra': effective['model_providers'][effective['model_provider']]['experimental_bearer_token'] = 'unexpected'
+            elif drift == 'auth_store': effective['cli_auth_credentials_store'] = 'file'
+            elif drift == 'model': effective['model'] = 'different'
+            elif drift == 'provider': effective['model_provider'] = 'different'
         result = {'config': effective}
     elif method == 'thread/turns/list':
         if state.get('unsupported_initial_history') and state.get('clients') == 1:
@@ -102,6 +111,7 @@ for line in sys.stdin:
             sys.exit(0)
         result = {'thread': {'id': thread_id, 'sessionId': thread_id,
                             'cwd': params.get('cwd', state['cwd']),
+                            **({'modelProvider': state.get('thread_provider', config['model_provider'])} if 'model_provider' in config else {}),
                             'turns': state.get('turns', []),
                             'status': {'type': 'active' if state.get('active') else 'idle'}}}
     elif method == 'mcpServerStatus/list':
