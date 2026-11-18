@@ -38,6 +38,7 @@ for line in sys.stdin:
         continue
     result = {}
     if method == 'initialize':
+        state['startup_config'] = config
         state['clients'] = state.get('clients', 0) + 1
         save()
     elif method == 'config/read':
@@ -54,6 +55,7 @@ for line in sys.stdin:
             drift = state['local_drift']
             if drift == 'origin': effective['model_providers'][effective['model_provider']]['base_url'] = 'http://127.0.0.1:1/v1'
             elif drift == 'auth_extra': effective['model_providers'][effective['model_provider']]['experimental_bearer_token'] = 'unexpected'
+            elif drift == 'stream_retries': effective['model_providers'][effective['model_provider']]['stream_max_retries'] = 3
             elif drift == 'summary': effective['model_reasoning_summary'] = 'auto'
             elif drift == 'web_search': effective['web_search'] = 'live'
             elif drift == 'auth_store': effective['cli_auth_credentials_store'] = 'file'

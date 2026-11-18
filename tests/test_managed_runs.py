@@ -135,6 +135,26 @@ enabled_tools = ["inspect"]
         self.assertEqual(json.loads(self.run_tool('partner', 'show', self.pair['id']))['last_run'], before)
         self.assertEqual(self.run_local()['status'], 'completed')
 
+    def test_local_stream_retries_are_pinned_and_checked(self):
+        self.repin(self.local_config('stream_max_retries = 0\n'))
+        self.assertEqual(self.run_local()['status'], 'completed')
+        self.assertEqual(self.native()['startup_config']['model_providers']['local']['stream_max_retries'], 0)
+        requests = self.native()['requests']
+        config_read = next(r for r in requests if r['method'] == 'thread/start')
+        self.assertEqual(config_read['params']['model'], 'local-model')
+        self.repin(self.local_config('stream_max_retries = 0\n'))
+        self.rpc_state.write_text(json.dumps({'cwd':str(self.worktree), 'local_drift':'stream_retries'}))
+        self.assertEqual(self.run_local()['status'], 'attention')
+        self.assertNotIn('thread/start', self.methods())
+
+    def test_local_stream_retries_reject_invalid_values(self):
+        for value in ('-1', '6', 'true', '1.5', '"0"'):
+            with self.subTest(value=value):
+                self.repin(self.local_config('stream_max_retries = '+value+'\n'))
+                self.rpc_state.write_text(json.dumps({'cwd':str(self.worktree)}))
+                self.assertEqual(self.run_local()['status'], 'attention')
+                self.assertNotIn('initialize', self.methods())
+
     def test_local_effective_drift_stops_before_assignment(self):
         for drift in ('model','provider','origin','auth_store','auth_extra','summary','web_search'):
             with self.subTest(drift=drift):

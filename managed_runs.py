@@ -184,7 +184,8 @@ def local_provider(profile):
     if not isinstance(providers, dict) or set(providers) != {name} or not isinstance(providers[name], dict):
         raise Attention('local provider requires exactly one selected custom provider')
     value = providers[name]
-    allowed = {'name', 'base_url', 'env_key', 'wire_api', 'requires_openai_auth', 'supports_websockets'}
+    allowed = {'name', 'base_url', 'env_key', 'wire_api', 'requires_openai_auth', 'supports_websockets',
+               'stream_max_retries'}
     if set(value) - allowed:
         raise Attention('local provider contains unsupported settings')
     url = value.get('base_url')
@@ -201,6 +202,9 @@ def local_provider(profile):
         raise Attention('local provider environment key is unavailable')
     if value.get('wire_api') != 'responses' or value.get('requires_openai_auth', False) is not False or value.get('supports_websockets', False) is not False:
         raise Attention('local provider requires responses without account auth or websockets')
+    if ('stream_max_retries' in value and
+            (type(value['stream_max_retries']) is not int or not 0 <= value['stream_max_retries'] <= 5)):
+        raise Attention('local provider stream retries must be an integer from 0 to 5')
     if 'name' in value and (not isinstance(value['name'], str) or not value['name'].strip() or len(value['name']) > 128):
         raise Attention('local provider display name is invalid')
     normalized = dict(value, requires_openai_auth=False, supports_websockets=False)
@@ -221,7 +225,7 @@ def check_local_effective(config, expected):
             or config.get('model') != expected['model'] or config.get('model_provider') != expected['model_provider']
             or not isinstance(actual, dict)
             or any(actual.get(k) != v for k, v in expected['provider'].items())
-            or any(v is not None for k, v in actual.items() if k in inert)
+            or any(v is not None for k, v in actual.items() if k in inert and k not in expected['provider'])
             or actual.get('supports_standalone_web_search', False) is not False
             or set(actual) - set(expected['provider']) - inert - {'supports_standalone_web_search'}):
         raise Attention('effective local model or provider differs from pinned configuration')
