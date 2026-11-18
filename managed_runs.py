@@ -216,6 +216,8 @@ def check_local_effective(config, expected):
              'request_max_retries', 'stream_max_retries', 'stream_idle_timeout_ms',
              'websocket_connect_timeout_ms'}
     if (config.get('cli_auth_credentials_store') != 'ephemeral'
+            or config.get('model_reasoning_summary') != 'none'
+            or config.get('web_search') != 'disabled'
             or config.get('model') != expected['model'] or config.get('model_provider') != expected['model_provider']
             or not isinstance(actual, dict)
             or any(actual.get(k) != v for k, v in expected['provider'].items())
@@ -360,8 +362,11 @@ def execute(pair, receipt, persist, timeout, filename, no_mcp, profile, local):
     config = profiles.tomllib.loads('\n'.join(overrides[1::2]))
     expected = capabilities(config)
     if local is not None:
+        config.update(model_reasoning_summary='none', web_search='disabled')
         receipt['local_provider'] = local
         overrides += ['-c', 'cli_auth_credentials_store='+profiles._toml('ephemeral'),
+                      '-c', 'model_reasoning_summary='+profiles._toml('none'),
+                      '-c', 'web_search='+profiles._toml('disabled'),
                       '-c', 'model='+profiles._toml(local['model']),
                       '-c', 'model_provider='+profiles._toml(local['model_provider']),
                       '-c', 'model_providers.'+local['model_provider']+'='+profiles._toml(local['provider'])]
@@ -506,7 +511,7 @@ def execute(pair, receipt, persist, timeout, filename, no_mcp, profile, local):
         persist('submitting', 'unknown')
         turn = client.request('turn/start', {'threadId': native_id,
                               'input': [{'type': 'text', 'text': prompt}],
-                              **({'model':local['model']} if local else {})}, deadline)['turn']
+                              **({'model':local['model'], 'summary':'none'} if local else {})}, deadline)['turn']
         owned_turn = storage.validate_session_id(turn['id'])
         receipt['turn_id'] = owned_turn
         persist('running', 'unknown')

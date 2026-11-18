@@ -179,6 +179,7 @@ Set `LOCAL_GATEWAY_KEY` in the runner's environment, then run:
 agent-sessions partner run PAIR_ID --local-provider
 ```
 
+Managed local mode disables reasoning summaries and hosted web search.
 The runner checks the effective model and provider before assignment. Resume with
 the same option and pinned provider. The key value is not included in the profile
 or launch arguments.

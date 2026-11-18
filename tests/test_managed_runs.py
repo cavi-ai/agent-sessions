@@ -113,6 +113,10 @@ enabled_tools = ["inspect"]
         for r in requests:
             if r['method'] in ('thread/start','turn/start'):
                 self.assertEqual(r['params']['model'], 'local-model')
+                if r['method'] == 'turn/start': self.assertEqual(r['params']['summary'], 'none')
+                if r['method'] == 'thread/start':
+                    self.assertEqual(r['params']['config']['model_reasoning_summary'], 'none')
+                    self.assertEqual(r['params']['config']['web_search'], 'disabled')
         self.assertEqual(self.run_local()['status'], 'completed')
         self.assertEqual(self.run_pair()['status'], 'attention')
 
@@ -132,7 +136,7 @@ enabled_tools = ["inspect"]
         self.assertEqual(self.run_local()['status'], 'completed')
 
     def test_local_effective_drift_stops_before_assignment(self):
-        for drift in ('model','provider','origin','auth_store','auth_extra'):
+        for drift in ('model','provider','origin','auth_store','auth_extra','summary','web_search'):
             with self.subTest(drift=drift):
                 self.repin(self.local_config())
                 self.rpc_state.write_text(json.dumps({'cwd': str(self.worktree), 'local_drift': drift}))
