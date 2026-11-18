@@ -154,6 +154,37 @@ When invoked from a native session, `partner run` requires that session to be on
 of the pair's endpoints. Terminal use without a native session identity remains
 available.
 
+## Use a local provider
+
+For a managed turn, `--local-provider` reads the model and selected provider from
+the pinned `.codex/config.toml`. The provider must use a literal loopback HTTP
+address, the Responses API and a key supplied by environment variable:
+
+```toml
+model = "your-local-model"
+model_provider = "local"
+
+[model_providers.local]
+name = "Local"
+base_url = "http://127.0.0.1:8095/v1"
+env_key = "LOCAL_GATEWAY_KEY"
+wire_api = "responses"
+requires_openai_auth = false
+supports_websockets = false
+```
+
+Set `LOCAL_GATEWAY_KEY` in the runner's environment, then run:
+
+```sh
+agent-sessions partner run PAIR_ID --local-provider
+```
+
+Managed local mode disables reasoning summaries and hosted web search. An optional
+`stream_max_retries` integer from 0 to 5 pins the provider stream retry limit.
+The runner checks the effective model and provider before assignment. Resume with
+the same option and pinned provider. The key value is not included in the profile
+or launch arguments.
+
 ## What the launcher preserves
 
 Both hosts use their configured model and native permission settings. Claude

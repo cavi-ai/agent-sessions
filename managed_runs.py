@@ -5,6 +5,7 @@ import json
 import math
 import os
 import queue
+import re
 import select
 import signal
 import stat
@@ -14,6 +15,7 @@ import threading
 import time
 from collections import deque
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import agent_sessions as storage
 import session_profiles as profiles
@@ -169,6 +171,71 @@ def capabilities(config):
     return expected
 
 
+def local_provider(profile):
+    """Validate the selected pinned provider without resolving or reading its key."""
+    config = profiles.pinned_codex_config(profile)
+    model, name, providers = config.get('model'), config.get('model_provider'), config.get('model_providers')
+    if (not isinstance(model, str) or not model.strip() or len(model) > 512
+            or any(ord(char) < 32 or ord(char) == 127 for char in model)):
+        raise Attention('local provider requires an explicit model')
+    if (not isinstance(name, str) or not re.fullmatch(r'[A-Za-z][A-Za-z0-9_-]{0,63}', name)
+            or name in ('openai', 'ollama', 'lmstudio')):
+        raise Attention('local provider requires a simple custom provider name')
+    if not isinstance(providers, dict) or set(providers) != {name} or not isinstance(providers[name], dict):
+        raise Attention('local provider requires exactly one selected custom provider')
+    value = providers[name]
+    allowed = {'name', 'base_url', 'env_key', 'wire_api', 'requires_openai_auth', 'supports_websockets',
+               'stream_max_retries'}
+    if set(value) - allowed:
+        raise Attention('local provider contains unsupported settings')
+    url = value.get('base_url')
+    if not isinstance(url, str) or not re.fullmatch(r'http://(?:127\.0\.0\.1|\[::1\]):[0-9]{1,5}(?:/[A-Za-z0-9._~-]+)*', url):
+        raise Attention('local provider requires a literal loopback HTTP URL with port')
+    parts = urlsplit(url)
+    if (not parts.port or parts.port > 65535 or parts.username or parts.password or parts.query or parts.fragment
+            or any(part in ('.', '..') for part in parts.path.split('/'))):
+        raise Attention('local provider URL is invalid')
+    key = value.get('env_key')
+    if not isinstance(key, str) or not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]{0,127}', key):
+        raise Attention('local provider requires an environment key reference')
+    if not os.environ.get(key):
+        raise Attention('local provider environment key is unavailable')
+    if value.get('wire_api') != 'responses' or value.get('requires_openai_auth', False) is not False or value.get('supports_websockets', False) is not False:
+        raise Attention('local provider requires responses without account auth or websockets')
+    if ('stream_max_retries' in value and
+            (type(value['stream_max_retries']) is not int or not 0 <= value['stream_max_retries'] <= 5)):
+        raise Attention('local provider stream retries must be an integer from 0 to 5')
+    if 'name' in value and (not isinstance(value['name'], str) or not value['name'].strip() or len(value['name']) > 128):
+        raise Attention('local provider display name is invalid')
+    normalized = dict(value, requires_openai_auth=False, supports_websockets=False)
+    return {'model': model, 'model_provider': name, 'provider': normalized}
+
+
+def check_local_effective(config, expected):
+    providers = config.get('model_providers')
+    actual = providers.get(expected['model_provider']) if isinstance(providers, dict) else None
+    inert = {'model_catalog_url', 'env_key_instructions', 'experimental_bearer_token',
+             'auth', 'gateway_oauth', 'aws', 'project_id', 'location', 'credential_file',
+             'capabilities', 'query_params', 'http_headers', 'env_http_headers',
+             'request_max_retries', 'stream_max_retries', 'stream_idle_timeout_ms',
+             'websocket_connect_timeout_ms'}
+    if (config.get('cli_auth_credentials_store') != 'ephemeral'
+            or config.get('model_reasoning_summary') != 'none'
+            or config.get('web_search') != 'disabled'
+            or config.get('model') != expected['model'] or config.get('model_provider') != expected['model_provider']
+            or not isinstance(actual, dict)
+            or any(actual.get(k) != v for k, v in expected['provider'].items())
+            or any(v is not None for k, v in actual.items() if k in inert and k not in expected['provider'])
+            or actual.get('supports_standalone_web_search', False) is not False
+            or set(actual) - set(expected['provider']) - inert - {'supports_standalone_web_search'}):
+        raise Attention('effective local model or provider differs from pinned configuration')
+
+
+def check_thread_provider(thread, expected):
+    if thread.get('modelProvider') != expected['model_provider']:
+        raise Attention('native thread provider differs from pinned configuration')
+
+
 def latest_turn(client, session_id, deadline):
     result = client.request('thread/turns/list', {'threadId': session_id, 'limit': 1,
                             'sortDirection': 'desc', 'itemsView': 'notLoaded'}, deadline)
@@ -181,7 +248,7 @@ def latest_turn(client, session_id, deadline):
     return turns[0] if turns else None
 
 
-def configured_client(profile, overrides, expected, deadline):
+def configured_client(profile, overrides, expected, deadline, local=None):
     client = Rpc(profile, overrides)
     try:
         client.request('initialize', {'clientInfo': {'name': 'agent-sessions', 'version': '0.2.0'},
@@ -189,6 +256,8 @@ def configured_client(profile, overrides, expected, deadline):
         client.send({'method': 'initialized', 'params': {}}, deadline)
         effective = client.request('config/read', {'cwd': profile['cwd'],
                                   'includeLayers': False}, deadline)['config']
+        if local is not None:
+            check_local_effective(effective, local)
         if capabilities(effective) != expected:
             raise Attention('effective enabled raw MCP servers differ from profile')
         return client
@@ -286,9 +355,8 @@ def record_mcp_call(item, receipt, expected):
     calls.append(value)
 
 
-def execute(pair, receipt, persist, timeout, filename, no_mcp):
+def execute(pair, receipt, persist, timeout, filename, no_mcp, profile, local):
     previous = pair.get('last_run', {})
-    profile = profiles.load(storage.data_dir(), pair['profile'])
     if profile['host'] != 'codex' or pair['partner']['host'] != 'codex':
         raise Attention('managed runs require a Codex profile and partner')
     if profile['cwd'] != pair['partner']['cwd']:
@@ -297,6 +365,15 @@ def execute(pair, receipt, persist, timeout, filename, no_mcp):
     overrides = profiles.codex_overrides(profile)
     config = profiles.tomllib.loads('\n'.join(overrides[1::2]))
     expected = capabilities(config)
+    if local is not None:
+        config.update(model_reasoning_summary='none', web_search='disabled')
+        receipt['local_provider'] = local
+        overrides += ['-c', 'cli_auth_credentials_store='+profiles._toml('ephemeral'),
+                      '-c', 'model_reasoning_summary='+profiles._toml('none'),
+                      '-c', 'web_search='+profiles._toml('disabled'),
+                      '-c', 'model='+profiles._toml(local['model']),
+                      '-c', 'model_provider='+profiles._toml(local['model_provider']),
+                      '-c', 'model_providers.'+local['model_provider']+'='+profiles._toml(local['provider'])]
     if receipt['session_id'] and previous.get('capabilities', {}).get('memory_context') is not False:
         raise Attention('existing worker memory context was not checked; preserve its identity '
                         'and reconcile the assignment before preparing a fresh worker')
@@ -310,7 +387,7 @@ def execute(pair, receipt, persist, timeout, filename, no_mcp):
                        profile['id'], storage.write_json, expected=profile['id'])
 
     try:
-        client = configured_client(profile, overrides, expected, deadline)
+        client = configured_client(profile, overrides, expected, deadline, local)
         receipt['capabilities'].update(automatic_skill_context=False, memory_context=False)
         session_id = receipt['session_id']
         if session_id:
@@ -342,7 +419,7 @@ def execute(pair, receipt, persist, timeout, filename, no_mcp):
             pair['status'] = 'profile_launch_pending'
         profiles.validate(profile)
         persist('loading', 'unknown')
-        thread = client.request(method, {**params, 'cwd': profile['cwd'], 'config': config},
+        thread = client.request(method, {**params, 'cwd': profile['cwd'], 'config': config, **({'model':local['model']} if local else {})},
                                 deadline)['thread']
         native_id = storage.validate_session_id(thread['id'])
         if session_id and native_id != session_id:
@@ -350,6 +427,8 @@ def execute(pair, receipt, persist, timeout, filename, no_mcp):
             raise Attention('native resume returned a different identity')
         receipt['session_id'] = native_id
         persist('loading', 'unknown')
+        if local is not None:
+            check_thread_provider(thread, local)
         if str(Path(thread['cwd']).resolve()) != profile['cwd']:
             raise Attention('native thread directory differs from profile')
         if thread.get('sessionId', native_id) != native_id:
@@ -394,10 +473,13 @@ def execute(pair, receipt, persist, timeout, filename, no_mcp):
                         client.close()
                         client = None
                         receipt['capabilities'].update(automatic_skill_context=None, memory_context=None)
-                        client = configured_client(profile, overrides, expected, deadline)
+                        client = configured_client(profile, overrides, expected, deadline, local)
                         receipt['capabilities'].update(automatic_skill_context=False, memory_context=False)
                         loaded = client.request('thread/resume', {'threadId': native_id,
-                            'excludeTurns': True, 'cwd': profile['cwd'], 'config': config}, deadline)['thread']
+                            'excludeTurns': True, 'cwd': profile['cwd'], 'config': config,
+                            **({'model': local['model']} if local else {})}, deadline)['thread']
+                        if local is not None:
+                            check_thread_provider(loaded, local)
                         if (loaded.get('id') != native_id or loaded.get('cwd') != profile['cwd']
                                 or loaded.get('sessionId', native_id) != native_id
                                 or loaded.get('status', {}).get('type') != 'idle'):
@@ -432,7 +514,8 @@ def execute(pair, receipt, persist, timeout, filename, no_mcp):
         receipt['turn_submitted'] = True
         persist('submitting', 'unknown')
         turn = client.request('turn/start', {'threadId': native_id,
-                              'input': [{'type': 'text', 'text': prompt}]}, deadline)['turn']
+                              'input': [{'type': 'text', 'text': prompt}],
+                              **({'model':local['model'], 'summary':'none'} if local else {})}, deadline)['turn']
         owned_turn = storage.validate_session_id(turn['id'])
         receipt['turn_id'] = owned_turn
         persist('running', 'unknown')
@@ -480,7 +563,7 @@ def execute(pair, receipt, persist, timeout, filename, no_mcp):
             client.close()
 
 
-def _run(pair_id, timeout, prompt_file, no_mcp):
+def _run(pair_id, timeout, prompt_file, no_mcp, use_local):
     pair = storage.read_pair(pair_id)
     previous = pair.get('last_run', {})
     receipt = {'pair_id': pair_id, 'session_id': pair['partner']['id'],
@@ -507,24 +590,30 @@ def _run(pair_id, timeout, prompt_file, no_mcp):
                 raise Attention('timeout must be positive and at most 3600 seconds')
             if not pair.get('profile') or pair['partner']['id'] and not previous:
                 raise Attention('managed run requires a profiled pair with managed ownership')
-
             def persist(phase, status):
                 receipt.update(phase=phase, status=status)
                 pair['last_run'] = dict(receipt)
                 storage.write_json(storage.pair_path(pair_id), pair)
 
+            preflight_done = False
             try:
-                execute(pair, receipt, persist, timeout, prompt_file, no_mcp)
+                profile = profiles.load(storage.data_dir(), pair['profile'])
+                local = local_provider(profile) if use_local else None
+                if receipt['session_id'] and previous.get('local_provider') != local:
+                    raise Attention('saved local provider mode or configuration changed')
+                preflight_done = True
+                execute(pair, receipt, persist, timeout, prompt_file, no_mcp, profile, local)
             except (OSError, ValueError, KeyError, TypeError) as exc:
                 receipt['error'] = str(exc)[:1024]
-                persist('preflight', 'attention')
+                if preflight_done or not receipt['session_id'] or not (use_local or previous.get('local_provider')):
+                    persist('preflight', 'attention')
                 print('agent-sessions: '+receipt['error'], file=sys.stderr)
     except (OSError, ValueError) as exc:
         print('agent-sessions: '+str(exc)[:1024], file=sys.stderr)
     return public_receipt(receipt)
 
 
-def run(pair_id, timeout=60, prompt_file=None, no_mcp=False):
+def run(pair_id, timeout=60, prompt_file=None, no_mcp=False, local_provider=False):
     previous = {signum: signal.getsignal(signum) for signum in (signal.SIGTERM, signal.SIGINT)}
     interrupted = False
 
@@ -537,7 +626,7 @@ def run(pair_id, timeout=60, prompt_file=None, no_mcp=False):
     try:
         for signum in previous:
             signal.signal(signum, interrupt)
-        return _run(pair_id, timeout, prompt_file, no_mcp)
+        return _run(pair_id, timeout, prompt_file, no_mcp, local_provider)
     finally:
         for signum, handler in previous.items():
             signal.signal(signum, handler)
