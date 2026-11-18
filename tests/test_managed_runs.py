@@ -98,7 +98,7 @@ enabled_tools = ["inspect"]
     def run_local(self):
         self.env['LOCAL_GATEWAY_KEY'] = 'local-test-key'
         result = subprocess.run([sys.executable, str(TOOL), 'partner', 'run', self.pair['id'],
-                                 '--timeout', '5', '--local-provider'], env=self.env,
+                                 '--timeout', '5', '--local-provider'], env=self.env, check=False,
                                 capture_output=True, text=True, timeout=15)
         return json.loads(result.stdout)
 
@@ -129,8 +129,9 @@ enabled_tools = ["inspect"]
         self.assertEqual(json.loads(self.run_tool('partner', 'show', self.pair['id']))['last_run'], before)
         self.env.pop('LOCAL_GATEWAY_KEY')
         result = subprocess.run([sys.executable, str(TOOL), 'partner', 'run', self.pair['id'],
-                                 '--timeout', '5', '--local-provider'], env=self.env,
+                                 '--timeout', '5', '--local-provider'], env=self.env, check=False,
                                 capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 1)
         self.assertEqual(json.loads(result.stdout)['status'], 'attention')
         self.assertEqual(json.loads(self.run_tool('partner', 'show', self.pair['id']))['last_run'], before)
         self.assertEqual(self.run_local()['status'], 'completed')
