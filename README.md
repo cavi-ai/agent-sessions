@@ -1,11 +1,13 @@
 # Agent Sessions
 
-[![Release](https://img.shields.io/github/v/release/cavi-ai/agent-sessions)](https://github.com/cavi-ai/agent-sessions/releases/latest)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+Build complex workflows around specialized agents.
 
 ![Fan out the work. Not the baggage. Five raccoon specialists travel with compact kits beside an impossibly overloaded luggage cart. Five-start projection: 175,285 to 86,325 startup input tokens.](assets/agent-sessions-hero.png)
 
-Build complex workflows around specialized agents. Give each worker a focused
+[![Release](https://img.shields.io/github/v/release/cavi-ai/agent-sessions)](https://github.com/cavi-ai/agent-sessions/releases/latest)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
+Give each worker a focused
 brief and its relevant tools, coordinate through queued handoffs, and bring
 useful results back to the main session.
 
