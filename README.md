@@ -1,44 +1,34 @@
 # Agent Sessions
 
-Build complex workflows around specialized agents.
+Run a team of specialized agents from one focused main session.
 
-![Fan out the work. Not the baggage. Five raccoon specialists travel with compact kits beside an impossibly overloaded luggage cart. Five-start projection: 175,285 to 86,325 startup input tokens.](assets/agent-sessions-hero.png)
+![Five raccoon specialists carry small kits past a luggage cart piled high](assets/agent-sessions-hero.png)
 
 [![Release](https://img.shields.io/github/v/release/cavi-ai/agent-sessions)](https://github.com/cavi-ai/agent-sessions/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Give each worker a focused
-brief and its relevant tools, coordinate through queued handoffs, and bring
-useful results back to the main session.
+Give each worker a focused brief, a pinned toolset, and its own session.
+Queue handoffs and bring the results back when you need them.
 
 [Get started](#get-started) · [Worker profiles](docs/agent-sessions/source/pages/guides/profiles.md) · [Integration guides](#use-your-existing-harness)
 
 ## A leaner start for your team
 
-Copying a broad setup into every worker spends tokens before the work begins.
-Agent Sessions lets you prepare separate workers with pinned configuration and
-selected tools, then reuse those sessions for later assignments.
-
-| Startup input tokens | Regular startup | Agent Sessions scoped startup |
-| --- | ---: | ---: |
-| One measured start | 35,057 | 17,265 |
-| Five-start projection | 175,285 | 86,325 |
-
-**88,960 fewer startup input tokens in the five-start projection: a 51% reduction
-in this reference setup.**
+Start workers with the tools their assignments need. Keep those sessions
+available for follow-up work.
 
 <details>
-<summary>Startup measurement</summary>
+<summary>Measured startup example</summary>
 
-Measured November 16, 2026, using this [source snapshot](https://github.com/cavi-ai/agent-sessions/tree/362793c988f044d452359260c94aa51fa141a8df) and native CLI 0.166.0.
-One startup per configuration used the same model, working directory and
-one-word-response prompt, with native startup defaults retained. Both returned
-`READY` and made no tool calls.
+One regular startup used **35,057 input tokens**. One startup with the scoped
+Agent Sessions profile used **17,265**, a **51% reduction**. Both used the same
+CLI, model, working directory, and one-word prompt. The regular launch used
+xhigh reasoning effort and the scoped launch used the native default. Counts
+include cached input.
 
-The regular configuration enabled five MCP servers. The scoped starter profile
-disabled optional MCP servers and automatic skill/memory context while retaining
-mandatory host and project instructions. Input counts include cached input.
-The five-start figures are five times each observed startup input count.
+The regular profile enabled five MCP servers. The scoped profile excluded
+optional MCP servers and automatic skill and memory context, and kept mandatory
+host and project instructions. See the [source snapshot used for this example](https://github.com/cavi-ai/agent-sessions/tree/362793c988f044d452359260c94aa51fa141a8df).
 
 </details>
 
