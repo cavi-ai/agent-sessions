@@ -13,7 +13,25 @@ except ImportError:  # Python 3.9 and 3.10
 
 LIMIT = 2 * 1024 * 1024
 REQUIRED = {'codex': ('.codex/config.toml',),
-            'claude': ('.claude/settings.local.json', '.mcp.json')}
+            'claude': ('.claude/settings.local.json', '.mcp.json'),
+            'agy': ('.agents/settings.json', '.agents/mcp_config.json')}
+HOST_ALIASES = {'antigravity': 'agy'}
+AGENT_FILE_RE = re.compile(r'^\.agents/agents/([A-Za-z0-9][A-Za-z0-9_-]{0,63})(?:/agent)?\.md$')
+
+
+def normalize_host(host):
+    return HOST_ALIASES.get(host, host)
+
+
+def _agent_files(paths):
+    found = []
+    for rel in paths:
+        if isinstance(rel, str) and (rel == '.agents/agents' or rel.startswith('.agents/agents/')):
+            match = AGENT_FILE_RE.fullmatch(rel)
+            if not match:
+                raise ProfileError('invalid custom agent file path under .agents/agents/')
+            found.append((rel, match.group(1)))
+    return found
 
 
 class ProfileError(ValueError):
@@ -48,12 +66,28 @@ def file_record(directory, relative):
 
 
 def capture(host, directory, name, extras=()):
+    host = normalize_host(host)
     if host not in REQUIRED or not re.fullmatch(r'[A-Za-z][A-Za-z0-9_-]{0,63}', name):
         raise ProfileError('profile needs a supported host and a simple name')
     root = Path(directory).expanduser().resolve(strict=True)
     if not root.is_dir():
         raise ProfileError('profile directory must exist')
-    paths = sorted(set(REQUIRED[host]) | set(extras))
+    extra_paths = set(extras)
+    agents = _agent_files(extra_paths)
+    if host == 'agy' and not agents:
+        dir_agent = f'.agents/agents/{name}/agent.md'
+        file_agent = f'.agents/agents/{name}.md'
+        has_dir = (root / dir_agent).exists() or (root / dir_agent).is_symlink()
+        has_file = (root / file_agent).exists() or (root / file_agent).is_symlink()
+        if has_dir and has_file:
+            raise ProfileError('ambiguous custom agent definition; keep only one agent file')
+        if has_dir:
+            extra_paths.add(dir_agent)
+        elif has_file:
+            extra_paths.add(file_agent)
+    paths = sorted(set(REQUIRED[host]) | extra_paths)
+    if len(_agent_files(paths)) > 1:
+        raise ProfileError('profile supports at most one custom agent file')
     if len(paths) > 16:
         raise ProfileError('profile supports at most 16 configuration files')
     value = {'version': 1, 'name': name, 'host': host, 'cwd': str(root),
@@ -80,6 +114,8 @@ def validate(profile):
         paths = [f['path'] for f in files]
         if paths != sorted(set(paths)) or not set(REQUIRED[profile['host']]) <= set(paths):
             raise ProfileError('profile native configuration is missing or duplicated')
+        if len(_agent_files(paths)) > 1:
+            raise ProfileError('profile supports at most one custom agent file')
         if fingerprint({k:v for k,v in profile.items() if k != 'id'}) != profile['id']:
             raise ProfileError('profile record changed')
         for record in files:
@@ -132,6 +168,7 @@ def binding(data, session_id):
 
 
 def guard(data, session_id, cwd, host, marker, write, expected=None):
+    host = normalize_host(host)
     existing = binding(data, session_id)
     if existing is None and marker is None and expected is None:
         return False
@@ -211,9 +248,122 @@ def codex_overrides(profile):
         raise ProfileError(f'cannot load pinned capability TOML: {exc}') from exc
 
 
-def argv(profile, session_id=None, prompt=None):
-    validate(profile)
+def _read_pinned(profile, relative):
     root = Path(profile['cwd'])
+    expected = next((f for f in profile['files'] if f['path'] == relative), None)
+    if expected is None:
+        raise ProfileError(f'profile configuration is missing: {relative}')
+    try:
+        path = root / relative
+        if path.resolve(strict=True) != path or not stat.S_ISREG(path.lstat().st_mode):
+            raise ProfileError('profile configuration must be a regular file without symlinks')
+        with path.open('rb') as stream:
+            raw = stream.read(LIMIT + 1)
+    except OSError as exc:
+        raise ProfileError(f'profile configuration changed or is unavailable: {relative}') from exc
+    if len(raw) > LIMIT or hashlib.sha256(raw).hexdigest() != expected['sha256']:
+        raise ProfileError(f'profile configuration changed before launch: {relative}')
+    return raw
+
+
+def _parse_frontmatter(text):
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != '---':
+        raise ProfileError('pinned custom agent must start with YAML frontmatter')
+    end = None
+    for idx in range(1, len(lines)):
+        if lines[idx].strip() == '---':
+            end = idx
+            break
+    if end is None:
+        raise ProfileError('pinned custom agent frontmatter is not terminated')
+    meta = {}
+    for line in lines[1:end]:
+        if not line.strip() or line.lstrip().startswith('#'):
+            continue
+        match = re.match(r'^([A-Za-z0-9_-]+)\s*:\s*(.*)$', line)
+        if match:
+            key, val = match.group(1), match.group(2).strip()
+            if len(val) >= 2 and val[0] == val[-1] and val[0] in ('"', "'"):
+                val = val[1:-1]
+            meta[key] = val
+    return meta
+
+
+def agy_overrides(profile):
+    """Validate pinned agy files and return native CLI override flags."""
+    root = Path(profile['cwd'])
+    raw_settings = _read_pinned(profile, '.agents/settings.json')
+    try:
+        settings = json.loads(raw_settings.decode('utf-8'))
+    except (UnicodeError, ValueError) as exc:
+        raise ProfileError('invalid JSON in .agents/settings.json') from exc
+    if not isinstance(settings, dict):
+        raise ProfileError('.agents/settings.json must be a JSON object')
+    if 'hooks' in settings:
+        raise ProfileError('hooks must not be configured in .agents/settings.json')
+    disable_slash = settings.get('disableSlashCommands')
+    if disable_slash is not None and not isinstance(disable_slash, bool):
+        raise ProfileError('disableSlashCommands in .agents/settings.json must be a boolean')
+
+    raw_mcp = _read_pinned(profile, '.agents/mcp_config.json')
+    try:
+        mcp = json.loads(raw_mcp.decode('utf-8'))
+    except (UnicodeError, ValueError) as exc:
+        raise ProfileError('invalid JSON in .agents/mcp_config.json') from exc
+    if not isinstance(mcp, dict):
+        raise ProfileError('.agents/mcp_config.json must be a JSON object')
+    if 'mcpServers' in mcp:
+        servers = mcp['mcpServers']
+        if not isinstance(servers, dict) or any(not isinstance(v, dict) for v in servers.values()):
+            raise ProfileError('mcpServers in .agents/mcp_config.json must be a map of objects')
+        for server in servers.values():
+            if not any(isinstance(server.get(k), str) and server.get(k)
+                       for k in ('command', 'url', 'serverUrl')):
+                raise ProfileError('each MCP server must specify command, url, or serverUrl')
+
+    args = ['--settings', str(root / '.agents/settings.json')]
+    agents = _agent_files([f['path'] for f in profile['files']])
+    if agents:
+        agent_path, agent_name = agents[0]
+        raw_agent = _read_pinned(profile, agent_path)
+        try:
+            text = raw_agent.decode('utf-8')
+        except UnicodeError as exc:
+            raise ProfileError('pinned custom agent must be valid UTF-8') from exc
+        meta = _parse_frontmatter(text)
+        if meta.get('name') != agent_name:
+            raise ProfileError('pinned custom agent frontmatter name must match its file path')
+        if meta.get('mainAgent', '').lower() == 'false':
+            raise ProfileError('pinned custom agent cannot disable mainAgent')
+        args += ['--agent', agent_name]
+    if disable_slash is True:
+        args.append('--disable-slash-commands')
+    return args
+
+
+def argv(profile, session_id=None, prompt=None, headless=False, output_format=None):
+    validate(profile)
+    if output_format not in (None, 'text', 'json', 'stream-json'):
+        raise ProfileError('output_format must be text, json, or stream-json')
+    if output_format is not None and not headless:
+        raise ProfileError('output_format requires headless mode')
+    if headless and profile['host'] != 'agy':
+        raise ProfileError('headless mode is only supported for agy profiles')
+    root = Path(profile['cwd'])
+    if profile['host'] == 'agy':
+        command = ['agy', *agy_overrides(profile)]
+        if session_id:
+            command += ['--conversation', session_id]
+        if headless:
+            if prompt is None:
+                raise ProfileError('headless mode requires a prompt')
+            if output_format is not None:
+                command += ['--output-format', output_format]
+            command += [f'--print={prompt}']
+        elif prompt is not None:
+            command += [f'--prompt-interactive={prompt}']
+        return command
     if profile['host'] == 'codex':
         command = ['codex', *codex_overrides(profile)]
         if session_id:
