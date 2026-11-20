@@ -1,9 +1,10 @@
 # Overview
 
-Agent Sessions helps Codex and Claude Code sessions coordinate on one machine.
-It discovers recent sessions, compares their Git checkouts, and passes messages
-through a local queue. It also records partner relationships and can preserve a
-worker's native launch configuration.
+Agent Sessions helps Codex, Claude Code, and Antigravity (`agy`) sessions
+coordinate on one machine. It discovers recent sessions, compares their Git
+checkouts, and passes messages through a local queue. It also records partner
+relationships and pins a worker's native launch configuration and starting
+context.
 
 ## What you can do
 
@@ -13,8 +14,8 @@ worker's native launch configuration.
 | Ask one session to take work | `agent-sessions send SESSION_ID 'brief'` |
 | Leave work for a session under a directory | `agent-sessions send /path/to/project 'brief'` |
 | Reserve a received message and reply | `agent-sessions claim MESSAGE_ID 'ready'` |
-| Set up Codex and Claude partners | [Partner sessions](../guides/partners.md) |
-| Keep a worker's configuration on resume | [Worker profiles](../guides/profiles.md) |
+| Set up Codex, Claude, and Antigravity partners | [Partner sessions](../guides/partners.md) |
+| Control starting context and pin worker configs | [Worker profiles](../guides/profiles.md) |
 
 ## How coordination works
 
@@ -30,16 +31,22 @@ access accounts or execute commands. See the [security model](../security/model.
 
 ## Sessions, partners and profiles
 
-A **session** is a discovered native Codex or Claude Code conversation. Recent
-activity is inferred from host records; a listed session is not necessarily running.
+A **session** is a discovered native Codex, Claude Code, or Antigravity (`agy`)
+conversation. Recent activity is inferred from host records; a listed session is
+not necessarily running.
 
 A **partner** is a recorded relationship between two sessions. One caller can
-have several Codex and Claude partners. Creating an ordinary Claude partner
-queues an invitation; creating an ordinary Codex partner uses the Codex app's
-native tools. [Partner sessions](../guides/partners.md) explains both routes.
+have several Codex, Claude Code, and Antigravity partners. Creating an ordinary
+Claude or Antigravity partner queues a path invitation; creating an ordinary
+Codex partner uses the Codex app's native tools. [Partner sessions](../guides/partners.md)
+explains both routes.
 
-A **profile** pins explicitly supplied configuration files and a directory.
-Profiles check launch context and configuration hashes. They do not authenticate
+A **profile** pins explicitly supplied configuration files and a directory so
+each worker starts with only the tools, custom agent settings, and MCP servers
+it needs. In multi-agent fanouts, stripping inherited global schemas prevents
+context rot and dramatically reduces token usage; see the
+[measured 5-agent fanout benchmarks](../guides/profiles.md#measured-5-agent-fanout-benchmarks).
+Profiles check launch context and configuration hashes; they do not authenticate
 workers or establish which tools a host actually exposes.
 
 ## Next steps

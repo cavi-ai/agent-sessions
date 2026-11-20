@@ -5,18 +5,20 @@ launch configuration of explicitly bound worker profiles.
 
 ## Preview and install
 
-Preview only the host you need, or both:
+Preview only the hosts you need:
 
 ```sh
 agent-sessions configure codex --dry-run
 agent-sessions configure claude --dry-run
+agent-sessions configure agy --dry-run
 ```
 
-Install the definitions:
+Install the definitions (`antigravity` is an alias for `agy`):
 
 ```sh
 agent-sessions configure codex
 agent-sessions configure claude
+agent-sessions configure agy
 ```
 
 Configuration merges this installation's handlers and preserves unrelated host
@@ -26,6 +28,7 @@ settings and hooks. Repeating it does not add duplicate handlers for that instal
 | --- | --- | --- |
 | Codex | `$CODEX_HOME/hooks.json`, default `~/.codex/hooks.json` | `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse` |
 | Claude Code | `$CLAUDE_CONFIG_DIR/settings.json`, default `~/.claude/settings.json` | `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse` |
+| Antigravity (`agy`) | `$AGY_CONFIG_DIR/hooks.json`, default `~/.gemini/config/hooks.json` | `SessionStart`, `PreInvocation`, `PreToolUse`, `PostToolUse` |
 
 ## Review and load
 
@@ -33,8 +36,8 @@ In Codex, open `/hooks` or Settings > Hooks to review and trust the exact defini
 Registration does not grant trust. Restart or resume a host if it has not loaded
 its updated configuration. See the official [Codex hooks documentation](https://learn.chatgpt.com/docs/hooks).
 
-Both hosts must use the same `AGENT_SESSIONS_DATA` value. If unset, they use
-`~/.local/share/agent-sessions`.
+All configured hosts must use the same `AGENT_SESSIONS_DATA` value. If unset,
+they use `~/.local/share/agent-sessions`.
 
 ## What the hooks do
 
@@ -45,7 +48,10 @@ to the main session, so a subagent does not consume the main thread's messages.
 
 `PreToolUse` checks bound profiles; it does not deliver messages. Ordinary
 messaging errors are reported on stderr without blocking the host. A profile
-mismatch blocks prompts and supported tools with exit code 2.
+mismatch fails closed: Codex and Claude Code exit with code 2, while Antigravity
+(`agy`) returns exit code 0 with a structured deny/terminate payload
+(`{"decision": "deny", "reason": ...}` on `PreToolUse` or
+`"terminationBehavior": "terminate"` on other events).
 
 Hosts control when events run. A native app follow-up may reach a later tool hook.
 Use `inbox` as the first action when a turn needs queued context before other work.
@@ -59,6 +65,7 @@ using that installation:
 ```sh
 agent-sessions configure codex --remove
 agent-sessions configure claude --remove
+agent-sessions configure agy --remove
 ```
 
 If an old installation has already disappeared, inspect the host settings and

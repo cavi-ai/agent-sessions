@@ -45,14 +45,17 @@ See [Messaging and claims](../guides/messaging.md).
 | --- | --- |
 | `configure codex` | Merge this installation's handlers into Codex settings |
 | `configure claude` | Merge this installation's handlers into Claude settings |
+| `configure agy` | Merge this installation's handlers into Antigravity hooks (`antigravity` alias accepted) |
 | `configure HOST --dry-run` | Print the merged settings without writing |
 | `configure HOST --remove` | Remove this installation's handlers, preserving other settings |
-| `hook [--host codex\|claude]` | Read one native hook payload as JSON on stdin |
+| `hook [--host codex\|claude\|agy\|antigravity]` | Read one native hook payload as JSON on stdin |
 
-`hook` is a host entry point. It uses `session_id` (or `thread_id`), `cwd` and
-`hook_event_name`; native transcript and subagent fields help route delivery.
-Configured commands supply the host explicitly. Profile mismatches exit 2;
-ordinary message-hook errors report a diagnostic and return 0.
+`hook` is a host entry point. It uses `session_id` (`thread_id` or `conversationId`),
+`cwd` (or `workspacePaths`) and `hook_event_name` (`hookEventName`); native
+transcript and subagent fields help route delivery. Configured commands supply
+the host explicitly. Profile mismatches fail closed: Codex and Claude exit 2,
+while Antigravity emits a structured deny/terminate payload on exit 0. Ordinary
+message-hook errors report a diagnostic and return 0.
 
 See [Hook setup](../guides/hooks.md).
 
@@ -61,12 +64,13 @@ See [Hook setup](../guides/hooks.md).
 | Command | Purpose |
 | --- | --- |
 | `partner claude PATH 'brief'` | Queue an invitation for a later Claude session |
+| `partner agy PATH 'brief'` | Queue an invitation for a later Antigravity session (`antigravity` alias accepted) |
 | `partner codex PATH 'brief' --project-id ID` | Save a native app creation request |
 | `partner HOST PATH 'brief' --profile PROFILE_ID` | Prepare a guarded profile launch |
 | `partner connect PAIR_ID [SESSION_ID] [--host-id local]` | Connect a discovered native endpoint; session defaults to the caller |
 | `partner attach SESSION_ID [--profile PROFILE_ID]` | Record an existing worker |
 | `partner show PAIR_ID` | Inspect a saved pair and its request or launch state |
-| `partner resume PAIR_ID [--dry-run]` | Resume the connected partner with its pinned profile |
+| `partner resume PAIR_ID [--dry-run] [--print PROMPT] [--headless] [--output-format FMT]` | Resume the connected partner with its pinned profile (`--print`/`--headless`/`--output-format` for `agy`) |
 | `partner run PAIR_ID [--prompt-file FILE] [--timeout SECONDS] [--no-mcp] [--local-provider]` | Own one Codex turn with direct profile and capability checks; `--no-mcp` rejects enabled MCP servers; timeout defaults to 60 seconds |
 
 Creation, connection, attachment and resume accept `--session ID` to identify the
@@ -81,8 +85,8 @@ See [Partner sessions](../guides/partners.md).
 | --- | --- |
 | `profile create HOST PATH NAME [--file RELATIVE_PATH]` | Pin required native files and any extra relative files |
 | `profile show PROFILE_ID` | Validate and inspect a saved profile |
-| `profile launch PROFILE_ID [--pair PAIR_ID] [--dry-run]` | Start a native host through the guarded launcher |
-| `profile launch PROFILE_ID --resume SESSION_ID [--dry-run]` | Resume a bound native session |
+| `profile launch PROFILE_ID [--pair PAIR_ID] [--dry-run] [--print PROMPT] [--headless] [--output-format FMT]` | Start a native host through the guarded launcher (`--print`/`--headless`/`--output-format` for `agy`, excluding `--pair`) |
+| `profile launch PROFILE_ID --resume SESSION_ID [--dry-run] [--print PROMPT] [--headless] [--output-format FMT]` | Resume a bound native session |
 
 Repeat `--file` to pin multiple extra files. A real launch replaces the CLI process
 with the native host. A dry run prints its command, working directory and profile
