@@ -43,7 +43,7 @@ class NativeError(Attention):
 class Rpc:
     def __init__(self, profile, overrides):
         env = dict(os.environ)
-        for name in ('CODEX_THREAD_ID', 'CLAUDE_CODE_SESSION_ID', 'AGENT_SESSIONS_PROFILE_ID'):
+        for name in (*storage.FOREIGN_SESSION_ENVS, 'AGENT_SESSIONS_PROFILE_ID'):
             env.pop(name, None)
         self.process = subprocess.Popen(['codex', *overrides, 'app-server', '--stdio'],
             cwd=profile['cwd'], stdin=subprocess.PIPE, stdout=subprocess.PIPE,

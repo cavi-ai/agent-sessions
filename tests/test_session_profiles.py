@@ -538,3 +538,19 @@ config = [{name = "painter", enabled = false}]
         self.assertIn('--output-format', observed['argv'])
         self.assertIn('stream-json', observed['argv'])
         self.assertIn('--print=Follow up', observed['argv'])
+
+    def test_agy_frontmatter_strips_inline_yaml_comments(self):
+        worker = self.root / 'agy-comment-worker'
+        (worker / '.agents' / 'agents' / 'auditor').mkdir(parents=True)
+        (worker / '.agents' / 'settings.json').write_text('{}\n')
+        (worker / '.agents' / 'mcp_config.json').write_text('{"mcpServers": {}}\n')
+        (worker / '.agents' / 'agents' / 'auditor' / 'agent.md').write_text(
+            '---\nname: auditor # inline comment\nmainAgent: false # subagent\n---\nPrompt\n'
+        )
+        created = json.loads(self.run_tool('profile', 'create', 'agy', str(worker), 'auditor'))
+        proc = subprocess.run(
+            [sys.executable, str(TOOL), 'profile', 'launch', created['id'], '--dry-run'],
+            env=self.env, capture_output=True, text=True, check=False,
+        )
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn('mainAgent', proc.stderr)

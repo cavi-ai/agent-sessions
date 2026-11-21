@@ -741,10 +741,47 @@ class AgyHostTests(Machine):
              "", "", 0, 0),
         ])
         self.run_tool("send", "agy-env-0010", "hello agy", "--session", "codex-main-0001")
-        env = {**self.env, "CODEX_THREAD_ID": "codex-main-0001",
-               "ANTIGRAVITY_CONVERSATION_ID": "agy-env-0010", "ANTIGRAVITY_AGENT": "1"}
-        inbox = json.loads(self.run_tool("--json", "inbox", env=env))
+        # Hermetic fake ps exercising _nearer_host's base == 'agy' branch regardless of parent shell
+        fake_bin = self.root / "fake-ps-agy"
+        fake_bin.mkdir()
+        fake_ps = fake_bin / "ps"
+        fake_ps.write_text("#!/bin/sh\necho '1 agy'\n")
+        fake_ps.chmod(0o755)
+        env = {**self.env, "PATH": str(fake_bin) + os.pathsep + os.environ.get("PATH", ""),
+               "CODEX_THREAD_ID": "codex-main-0001",
+               "ANTIGRAVITY_CONVERSATION_ID": "agy-env-0010"}
+        inbox = json.loads(self.run_tool("--json", "inbox", "--keep", env=env))
         self.assertEqual([m["text"] for m in inbox], ["hello agy"])
+
+        # Fallback to ANTIGRAVITY_AGENT=1 when ps reports no known host ancestor
+        fake_ps.write_text("#!/bin/sh\necho '1 zsh'\n")
+        env_fallback = {**env, "ANTIGRAVITY_AGENT": "1"}
+        inbox2 = json.loads(self.run_tool("--json", "inbox", env=env_fallback))
+        self.assertEqual([m["text"] for m in inbox2], ["hello agy"])
+
+    def test_agy_skips_invalid_conversation_ids_from_db(self):
+        self._write_agy_db([
+            ("../escape", "Bad row", "", str(self.now),
+             json.dumps([f"file://{self.worktree}"]), "CASCADE_RUN_STATUS_IDLE",
+             "", "", 0, 0),
+            ("agy-good-0011", "Good row", "", str(self.now),
+             json.dumps([f"file://{self.worktree}"]), "CASCADE_RUN_STATUS_IDLE",
+             "", "", 0, 0),
+        ])
+        listed = json.loads(self.run_tool("--json", "list"))
+        ids = [s["id"] for s in listed]
+        self.assertIn("agy-good-0011", ids)
+        self.assertNotIn("../escape", ids)
+
+    def test_agy_hook_malformed_json_with_env_fails_closed_exit_zero(self):
+        env = {**self.env, "ANTIGRAVITY_CONVERSATION_ID": "agy-badjson-0001",
+               "AGENT_SESSIONS_PROFILE_ID": "prof-test-0001"}
+        proc = subprocess.run([sys.executable, str(TOOL), "hook"], input="{not-json",
+                              env=env, capture_output=True, text=True, check=False)
+        self.assertEqual(proc.returncode, 0)
+        body = json.loads(proc.stdout)
+        self.assertEqual(body["terminationBehavior"], "terminate")
+        self.assertIn("agent-sessions hook:", proc.stderr)
 
 
 if __name__ == "__main__":

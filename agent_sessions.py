@@ -20,7 +20,7 @@ import tempfile
 import time
 import urllib.parse
 import uuid
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -112,9 +112,11 @@ def claude_is_nearer():
     return False
 
 
+SESSION_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,199}")
+
+
 def validate_session_id(session_id):
-    if not isinstance(session_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,199}",
-                                                         session_id):
+    if not isinstance(session_id, str) or not SESSION_ID_RE.fullmatch(session_id):
         raise ValueError("invalid session id; use letters, numbers, underscores and hyphens")
     return session_id
 
@@ -338,6 +340,8 @@ AGY_STEP_PATH_RE = re.compile(
 
 
 def agy_edited(conversation_id):
+    if not isinstance(conversation_id, str) or not SESSION_ID_RE.fullmatch(conversation_id):
+        return []
     edited = []
     home_dir = agy_home()
     transcript = home_dir / "brain" / conversation_id / ".system_generated/logs/transcript.jsonl"
@@ -372,28 +376,27 @@ def agy_edited(conversation_id):
         conv_db = home_dir / "conversations" / f"{conversation_id}.db"
         if conv_db.is_file():
             try:
-                conn = sqlite3.connect(f"file:{conv_db}?mode=ro", uri=True, timeout=5)
-                cols = {row[1] for row in conn.execute("pragma table_info(steps)")}
-                col = "step_payload" if "step_payload" in cols else (
-                    "payload" if "payload" in cols else None
-                )
-                if col:
-                    rows = conn.execute(f"select {col} from steps where step_type = 132").fetchall()
-                    for (payload,) in rows:
-                        if not payload:
-                            continue
-                        text = (payload.decode("utf-8", errors="ignore")
-                                if isinstance(payload, (bytes, bytearray)) else str(payload))
-                        if not any(tool in text for tool in AGY_EDIT_TOOLS):
-                            continue
-                        for match in AGY_STEP_PATH_RE.finditer(text):
-                            try:
-                                path_val = json.loads(f'"{match.group(1)}"')
-                            except ValueError:
-                                path_val = match.group(1)
-                            if path_val:
-                                edited.append(path_val)
-                conn.close()
+                with closing(sqlite3.connect(f"file:{conv_db}?mode=ro", uri=True, timeout=5)) as conn:
+                    cols = {row[1] for row in conn.execute("pragma table_info(steps)")}
+                    col = "step_payload" if "step_payload" in cols else (
+                        "payload" if "payload" in cols else None
+                    )
+                    if col:
+                        rows = conn.execute(f"select {col} from steps where step_type = 132").fetchall()
+                        for (payload,) in rows:
+                            if not payload:
+                                continue
+                            text = (payload.decode("utf-8", errors="ignore")
+                                    if isinstance(payload, (bytes, bytearray)) else str(payload))
+                            if not any(tool in text for tool in AGY_EDIT_TOOLS):
+                                continue
+                            for match in AGY_STEP_PATH_RE.finditer(text):
+                                try:
+                                    path_val = json.loads(f'"{match.group(1)}"')
+                                except ValueError:
+                                    path_val = match.group(1)
+                                if path_val:
+                                    edited.append(path_val)
             except sqlite3.Error:
                 pass
     return unique_last(edited)
@@ -404,34 +407,34 @@ def agy_sessions(since, within=None):
     if not db.is_file():
         return []
     try:
-        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=5)
-        cols = {row[1] for row in conn.execute("pragma table_info(conversation_summaries)")}
-        if not {"conversation_id", "last_modified_time", "workspace_uris"} <= cols:
-            conn.close()
-            return []
-        sel = [
-            "conversation_id",
-            "last_modified_time",
-            "workspace_uris",
-            "title" if "title" in cols else "''",
-            "preview" if "preview" in cols else "''",
-            "status" if "status" in cols else "''",
-            "parent_conversation_id" if "parent_conversation_id" in cols else "''",
-            "agent_name" if "agent_name" in cols else "''",
-            "not_fully_idle" if "not_fully_idle" in cols else "0",
-        ]
-        where = "where coalesce(killed, 0) = 0 " if "killed" in cols else ""
-        rows = conn.execute(
-            f"select {', '.join(sel)} from conversation_summaries "
-            f"{where}order by last_modified_time desc"
-        ).fetchall()
-        conn.close()
+        with closing(sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=5)) as conn:
+            cols = {row[1] for row in conn.execute("pragma table_info(conversation_summaries)")}
+            if not {"conversation_id", "last_modified_time", "workspace_uris"} <= cols:
+                return []
+            sel = [
+                "conversation_id",
+                "last_modified_time",
+                "workspace_uris",
+                "title" if "title" in cols else "''",
+                "preview" if "preview" in cols else "''",
+                "status" if "status" in cols else "''",
+                "parent_conversation_id" if "parent_conversation_id" in cols else "''",
+                "agent_name" if "agent_name" in cols else "''",
+                "not_fully_idle" if "not_fully_idle" in cols else "0",
+            ]
+            where = "where coalesce(killed, 0) = 0 " if "killed" in cols else ""
+            rows = conn.execute(
+                f"select {', '.join(sel)} from conversation_summaries "
+                f"{where}order by last_modified_time desc"
+            ).fetchall()
     except sqlite3.Error as exc:
         print(f"agent-sessions: cannot read {db}: {exc}", file=sys.stderr)
         return []
     found = []
     for (cid, modified, uris_raw, title, preview, status_raw, parent_id,
          agent_name, not_idle) in rows:
+        if not isinstance(cid, str) or not SESSION_ID_RE.fullmatch(cid):
+            continue
         updated = _parse_timestamp(modified)
         if updated is None or updated < since:
             continue
@@ -1573,9 +1576,12 @@ def _main(argv=None):
         return 0
 
     if args.command == "hook":
-        effective_host = profiles.normalize_host(args.host) if args.host else None
+        env_sid = environment_session_id()
+        effective_host = _detect_hook_host(
+            {}, env_sid, profiles.normalize_host(args.host) if args.host else None
+        )
         event = ""
-        profiled = has_profile_context(environment_session_id())
+        profiled = has_profile_context(env_sid)
 
         def _agy_block(msg):
             if event == "PreToolUse":

@@ -284,8 +284,11 @@ def _parse_frontmatter(text):
         match = re.match(r'^([A-Za-z0-9_-]+)\s*:\s*(.*)$', line)
         if match:
             key, val = match.group(1), match.group(2).strip()
-            if len(val) >= 2 and val[0] == val[-1] and val[0] in ('"', "'"):
-                val = val[1:-1]
+            quoted = re.match(r'^("([^"]*)"|\'([^\']*)\')(?:\s+#.*)?$', val)
+            if quoted:
+                val = quoted.group(2) if quoted.group(2) is not None else quoted.group(3)
+            else:
+                val = re.sub(r'(?:^|\s+)#.*$', '', val).strip()
             meta[key] = val
     return meta
 
