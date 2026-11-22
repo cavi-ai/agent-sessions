@@ -2,7 +2,7 @@
 
 Run a team of specialized agents from one focused main session.
 
-![Five raccoon specialists carry small kits past a luggage cart piled high](assets/agent-sessions-hero.png)
+![Five raccoon specialists travel light. The scoped-tools benchmark used 82.6% fewer input tokens across five workers.](assets/agent-sessions-hero.png)
 
 [![Release](https://img.shields.io/github/v/release/cavi-ai/agent-sessions)](https://github.com/cavi-ai/agent-sessions/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -12,25 +12,17 @@ Queue handoffs and bring the results back when you need them.
 
 [Get started](#get-started) · [Worker profiles](docs/agent-sessions/source/pages/guides/profiles.md) · [Integration guides](#use-your-existing-harness)
 
-## A leaner start for your team
+## Five-worker benchmark
 
-Start workers with the tools their assignments need. Keep those sessions
-available for follow-up work.
+Five concurrent security-audit workers ran on Antigravity using Gemini 3.8 Flash (Low).
 
-<details>
-<summary>Measured startup example</summary>
+| Agent Sessions profile | Unprofiled input | Profiled input | Fewer input tokens |
+| --- | ---: | ---: | ---: |
+| Scoped tools with guarded hooks | 228,667 | 39,849 | **82.6%** |
+| Tool-free | 111,452 | 3,775 | **96.6%** |
 
-One regular startup used **35,057 input tokens**. One startup with the scoped
-Agent Sessions profile used **17,265**, a **51% reduction**. Both used the same
-CLI, model, working directory, and one-word prompt. The regular launch used
-xhigh reasoning effort and the scoped launch used the native default. Counts
-include cached input.
-
-The regular profile enabled five MCP servers. The scoped profile excluded
-optional MCP servers and automatic skill and memory context, and kept mandatory
-host and project instructions. See the [source snapshot used for this example](https://github.com/cavi-ai/agent-sessions/tree/362793c988f044d452359260c94aa51fa141a8df).
-
-</details>
+Both profiles scored **5/5** for accuracy. The scoped-tools run verified all five live hook bindings.
+See [the full results and worker profiles](docs/agent-sessions/source/pages/guides/profiles.md#measured-5-agent-fanout-benchmarks).
 
 ## Build the workflow around the work
 
@@ -103,29 +95,6 @@ and launch context.
 
 [Security model](docs/agent-sessions/source/pages/security/model.md) ·
 [Worker configuration](docs/agent-sessions/source/pages/guides/profiles.md)
-
-## Why starting-context profiles matter (5-agent fanout benchmark)
-
-When you fan out parallel workers, every worker inherits your global tool
-schemas, plugins, and MCP servers by default. That startup overhead compounds
-across every worker and turn, accelerating context rot and crowding out the
-actual task—especially on smaller-context local models and high-concurrency
-fanouts.
-
-Measured on a live 5-agent concurrent security-audit fanout in Antigravity
-(`agy`, `Gemini 3.8 Flash (Low)`):
-
-| Profile tier | Input tokens | Total tokens | Input savings | Wall time | Accuracy |
-| --- | ---: | ---: | ---: | ---: | :---: |
-| Unprofiled baseline (inline) | 111,452 | 112,961 | — | 22.50s | 5/5 |
-| Profiled tool-free (`notools`) | 3,775 | 7,389 | **96.6%** | 14.70s (1.53x faster) | 5/5 |
-| Unprofiled with tools (2-turn) | 228,667 | 231,387 | — | 27.64s | 5/5 |
-| Profiled scoped-tools + guarded hooks (`scoped-tools`) | 39,849 | 43,971 | **82.6%** | 23.43s | 5/5 |
-
-Pinning a minimal starting context cuts fanout input tokens by **96.6%** for
-tool-free workers and **82.6%** for scoped-tools workers while keeping live
-hook guards enforced. See [Worker profiles](docs/agent-sessions/source/pages/guides/profiles.md)
-for profile tiers, scoped-MCP results, and setup examples.
 
 ## Documentation and help
 
