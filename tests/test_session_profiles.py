@@ -405,11 +405,11 @@ config = [{name = "painter", enabled = false}]
         self.assertNotEqual(bad.returncode, 0)
 
     def test_agy_profile_validation_rejects_bad_settings_mcp_and_frontmatter(self):
-        secret = 'super-secret-token-value'
+        sentinel = 'synthetic-redacted-marker-for-test'
         bad_cases = [
-            ({'hooks': {'PreToolUse': secret}}, {'mcpServers': {}}, None),
-            ({'disableSlashCommands': secret}, {'mcpServers': {}}, None),
-            ({'disableSlashCommands': False}, {'mcpServers': {'bad': {'env': secret}}}, None),
+            ({'hooks': {'PreToolUse': sentinel}}, {'mcpServers': {}}, None),
+            ({'disableSlashCommands': sentinel}, {'mcpServers': {}}, None),
+            ({'disableSlashCommands': False}, {'mcpServers': {'bad': {'env': sentinel}}}, None),
             ({'disableSlashCommands': False}, {'mcpServers': {}},
              '---\nname: wrong\n---\nbody\n'),
             ({'disableSlashCommands': False}, {'mcpServers': {}},
@@ -426,7 +426,7 @@ config = [{name = "painter", enabled = false}]
                                      capture_output=True, text=True, check=False)
                 self.assertNotEqual(res.returncode, 0)
                 self.assertEqual(res.stdout, '')
-                self.assertNotIn(secret, res.stderr)
+                self.assertNotIn(sentinel, res.stderr)
 
     def test_agy_headless_and_pair_bootstrap_constraints(self):
         codex_profile, _ = self.profile('codex')
