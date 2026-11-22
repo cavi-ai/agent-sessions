@@ -10,22 +10,23 @@ In the sending session:
 
 ```sh
 agent-sessions list
-agent-sessions who .
+agent-sessions who . --host codex --match 'integration'
 ```
 
-`list` shows recently active Codex and Claude sessions. `who` narrows the view to
-your repository, including linked worktrees. A `SAME WORKTREE` label means another
-session uses your checkout. Coordinate file ownership before editing shared files.
+`list` shows recent Codex, Claude and Antigravity records. `who` narrows the view
+to your repository, including linked worktrees. Omit filters to show all hosts.
+`--match` searches IDs, titles, branches and checkout paths without case
+sensitivity. A `SAME WORKTREE` label means another session uses your checkout. Coordinate file ownership before editing shared files.
 
 ## 2. Send a bounded brief
 
 Copy the recipient's ID and replace `SESSION_ID`:
 
 ```sh
-agent-sessions send SESSION_ID 'Review the parser; report edge cases before changing files'
+agent-sessions send SESSION_ID 'Are you running the integration suite? I can wait or take a different shard.'
 ```
 
-Use a complete ID, or an unambiguous prefix of at least six characters.
+Copy the full ID from the display or JSON, or use an unambiguous prefix of at least six characters.
 The command queues a message; it does not start a turn in the other session.
 
 ## 3. Read and claim
@@ -40,7 +41,7 @@ Read the brief. If the work is authorized for that session, copy its message ID
 and replace `MESSAGE_ID`:
 
 ```sh
-agent-sessions claim MESSAGE_ID 'ready, reviewing the parser'
+agent-sessions claim MESSAGE_ID 'I am running the integration suite'
 ```
 
 Only one session can claim a message. If another session already holds it, leave
@@ -65,6 +66,7 @@ Register the hosts you use:
 ```sh
 agent-sessions configure codex
 agent-sessions configure claude
+agent-sessions configure agy
 ```
 
 Review and trust the Codex definitions in `/hooks` or Settings > Hooks.

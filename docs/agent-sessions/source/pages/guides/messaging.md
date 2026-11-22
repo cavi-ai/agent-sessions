@@ -1,5 +1,21 @@
 # Messaging and claims
 
+## Find an existing peer
+
+Use the shared local message store to coordinate with an already-open Codex,
+Claude Code or Antigravity session in the same project:
+
+```sh
+agent-sessions who . --host codex --match 'integration'
+agent-sessions send SESSION_ID 'Are you running the integration suite? I can wait or take a different shard.'
+```
+
+Copy the full ID from the display or `--json`. `--host` also accepts `claude`,
+`agy` or `antigravity`. Omit it to include all hosts. `--match` is a
+case-insensitive literal match against session ID, title, branch, working
+directory and Git checkout paths. Discovery reflects recent records, not
+guaranteed process liveness. No partner creation is needed to queue a message.
+
 ## Choose a recipient
 
 Send to a session ID for one recipient:
@@ -62,7 +78,8 @@ agent's acknowledgment and ownership of the message.
 
 ## Session identity
 
-Codex uses `CODEX_THREAD_ID`; Claude Code uses `CLAUDE_CODE_SESSION_ID`. When the
+Codex uses `CODEX_THREAD_ID`, Claude Code uses `CLAUDE_CODE_SESSION_ID`,
+Antigravity uses `ANTIGRAVITY_CONVERSATION_ID`. When the
 hosts are nested, the nearer native process determines which identity is used.
 Use `--session ID` to select the caller explicitly for commands that accept it.
 

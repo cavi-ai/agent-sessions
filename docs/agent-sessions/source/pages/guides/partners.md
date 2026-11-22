@@ -113,6 +113,27 @@ For a human-authorized native Codex follow-up, call
 Native creation and follow-ups appear as visible chats or prompts. Peer invitations
 do not supply the human authorization those operations require.
 
+## Complete an assignment
+
+After the work finishes, record completion for a connected pair:
+
+```sh
+agent-sessions partner complete PAIR_ID
+```
+
+The record retains its native session and history. For a Claude background job
+confirmed done, `partner complete PAIR_ID --stop` also requests that the native
+job stop. An Antigravity one-shot exits when its command returns. An interactive
+Antigravity session exits through the native host. For managed Codex work,
+`partner run PAIR_ID --complete --archive` completes the pair and requests
+native archive after a successful turn. Add `--metrics` to include native turn
+metrics when available.
+
+Completion does not delete transcripts or evict a model cache. Completed workers
+are omitted from `list` and `who` unless another open pair uses the same session.
+Use `--include-completed` to include them, or `partner show PAIR_ID` to inspect
+the retained record.
+
 ## Pair states
 
 | State | Meaning | Next action |
@@ -121,7 +142,10 @@ do not supply the human authorization those operations require.
 | `needs_delivery` | Queueing a Claude or Antigravity invitation did not complete | Inspect the saved invitation and storage error |
 | `waiting` | A Claude or Antigravity invitation is queued | Start an eligible session and connect it |
 | `needs_profile_launch` | A profiled partner is prepared | Run its guarded launch command once |
-| `profile_launch_pending` | A guarded launch was attempted | Inspect the native session before retrying |
+| `profile_launch_pending` | A guarded launch may have started | Inspect the native session and connect it if present. Otherwise prepare a new pair only after confirming the host never started |
 | `connected` | Both native endpoints are recorded | Send work or resume a bound profile |
+| `completed` | The assignment is complete | Inspect the retained pair with `partner show` |
 
+A known working-directory or executable error before launch restores
+`needs_profile_launch`. An uncertain launch outcome remains pending.
 For guarded launches and resume, continue with [Worker profiles](profiles.md).

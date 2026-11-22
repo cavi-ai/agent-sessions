@@ -28,7 +28,7 @@ See [the full results and worker profiles](docs/agent-sessions/source/pages/guid
 
 - **Give specialists a stable scope.** Pin a worker's directory, native settings
   and selected configuration files. Guarded launch and resume check those files
-  before continuing. Managed runs also verify the effective MCP tool inventory
+  before continuing. Managed Codex runs also check the effective MCP tool inventory
   before assigning work.
 - **Keep the main session focused.** Fresh managed workers start without the
   coordinator's conversation history. Detailed execution lives in the worker;
@@ -49,10 +49,19 @@ See [the full results and worker profiles](docs/agent-sessions/source/pages/guid
 Requires Python 3.9+, Git, and macOS or Linux.
 
 ```sh
-uv tool install git+https://github.com/cavi-ai/agent-sessions.git
+uv tool install git+https://github.com/cavi-ai/agent-sessions.git@v0.2.0
 ```
 
-Install the Agent Sessions plugin from the Cavi marketplace for Claude Code or Codex to make its coordination skill available. The plugin requires the CLI above; it does not install hooks. See [plugin installation](docs/agent-sessions/source/pages/introduction/installation.md#install-the-plugin) for commands and optional hook setup.
+The currently published stable release is v0.2.0. This checkout targets 0.3.0
+and includes Antigravity support, managed local providers and peer filters.
+Install this checkout for those features:
+
+```sh
+uv tool install --editable --reinstall .
+```
+
+See [installation](docs/agent-sessions/source/pages/introduction/installation.md)
+for the corresponding plugin and hook setup.
 
 Give your coordinator the [worker-profile guide](docs/agent-sessions/source/pages/guides/profiles.md)
 and a bounded assignment:
@@ -61,8 +70,16 @@ and a bounded assignment:
 > the brief and tools its stage needs. Queue the handoffs, collect one useful
 > result per stage, and keep detailed execution in the worker sessions.
 
-Use the [partner guide](docs/agent-sessions/source/pages/guides/partners.md) to
-connect existing workers or prepare new ones. For shared native resources,
+Find an existing peer before starting shared-project work or expensive tests:
+
+```sh
+agent-sessions who . --host codex --match 'integration'
+agent-sessions send SESSION_ID 'Are you running the integration suite? I can wait or take a different shard.'
+```
+
+Copy the full ID from the display or JSON. Delivery waits for a host hook or
+`inbox`. It does not start a session. Use the [partner guide](docs/agent-sessions/source/pages/guides/partners.md)
+to connect existing workers or prepare new ones. For shared native resources,
 integrate the [resource client](docs/agent-sessions/source/pages/guides/resources.md)
 with your supervising harness.
 
@@ -75,7 +92,7 @@ Agent Sessions provides a local CLI and a packaged Python resource client.
 Keep your coordinator and native agent tools; use the session records, profiles
 and queues where your workflow needs them.
 
-| Surface | Current support |
+| Surface | Source checkout support |
 | --- | --- |
 | Native sessions | Codex, Claude Code, and Antigravity (`agy`) discovery, messaging and partner records |
 | Profiled workers | Pinned configuration with guarded launch and resume for all three hosts |

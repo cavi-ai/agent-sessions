@@ -21,8 +21,11 @@ agent-sessions configure claude
 agent-sessions configure agy
 ```
 
-Configuration merges this installation's handlers and preserves unrelated host
-settings and hooks. Repeating it does not add duplicate handlers for that installation.
+Configuration preserves unrelated host settings and hooks. Codex and Claude
+match this installation’s command when merging or removing handlers. Antigravity
+keeps unrelated entries in its named `agent-sessions` group. Reconfiguration
+replaces older Agent Sessions handlers, and removal matches this installation’s
+command.
 
 | Host | Configuration file | Registered events |
 | --- | --- | --- |
@@ -42,9 +45,10 @@ they use `~/.local/share/agent-sessions`.
 ## What the hooks do
 
 Startup and prompt hooks deliver messages and identify other sessions in the
-same checkout once per peer. Tool hooks deliver new messages as the host runs.
-An empty inbox produces no message context. Claude subagent hooks leave delivery
-to the main session, so a subagent does not consume the main thread's messages.
+same checkout once per peer. Codex and Claude Code also check for messages at
+`PostToolUse`. The configured Antigravity hooks deliver at `SessionStart` and
+`PreInvocation`. An empty inbox produces no message context. Hooks marked with
+`agent_id` leave message delivery to the main session.
 
 `PreToolUse` checks bound profiles; it does not deliver messages. Ordinary
 messaging errors are reported on stderr without blocking the host. A profile
@@ -58,9 +62,9 @@ Use `inbox` as the first action when a turn needs queued context before other wo
 
 ## Update, move or remove
 
-Hook commands contain absolute Python and module paths. Run `configure` again
-after updating. Before moving or uninstalling an installation, remove its handlers
-using that installation:
+Hook commands contain absolute Python and module paths. Before moving, updating
+or uninstalling an installation, remove its handlers using that installation.
+Remove the old installation’s handlers before configuring the new CLI:
 
 ```sh
 agent-sessions configure codex --remove
@@ -69,7 +73,7 @@ agent-sessions configure agy --remove
 ```
 
 If an old installation has already disappeared, inspect the host settings and
-remove only the obsolete agent-sessions command. Keep other handlers intact.
-Install the current definitions and repeat Codex's trust review as needed.
+remove only its obsolete handlers. Keep other handlers intact. Install the current definitions and repeat Codex’s trust review
+as needed.
 
 For missing messages or blocked profiles, see [Troubleshooting](troubleshooting.md).

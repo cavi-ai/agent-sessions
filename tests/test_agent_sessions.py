@@ -97,6 +97,153 @@ class Machine(unittest.TestCase):
 
 
 class ListTests(Machine):
+    def test_discovery_filters_and_full_ids_with_exact_id_precedence(self):
+        first = 'same-prefix-12345'
+        second = first + '-extra'
+        self.thread(first, self.repo, 'Needle worker', 'vscode', [])
+        self.thread(second, self.worktree, 'Second worker', 'vscode', [])
+        outside = self.root / 'outside'
+        outside.mkdir()
+        git('init', cwd=outside)
+        self.thread('other-needle-0001', outside, 'Needle outside', 'vscode', [])
+        connection = sqlite3.connect(self.codex / 'state_5.sqlite')
+        try:
+            connection.executemany('insert into threads values (?,?,?,?,?,?,?,?,?,?,?)', self.rows[-3:])
+            connection.commit()
+        finally:
+            connection.close()
+        output = self.run_tool('list', '--host', 'codex')
+        self.assertIn(first, output)
+        self.assertIn(second, output)
+        selected = json.loads(self.run_tool('--json', 'list', '--host', 'codex', '--match', 'nEeDlE'))
+        self.assertEqual({row['id'] for row in selected}, {first, 'other-needle-0001'})
+        same_repo = json.loads(self.run_tool('--json', 'who', str(self.repo), '--match', 'needle'))
+        self.assertEqual([row['id'] for row in same_repo['sessions']], [first])
+        branch = json.loads(self.run_tool('--json', 'who', str(self.repo), '--host', 'codex', '--match', 'FEAT/OTHER'))
+        self.assertIn(second, [row['id'] for row in branch['sessions']])
+        self.assertIn(second, self.run_tool('who', str(self.repo), '--host', 'codex', '--match', 'FEAT/OTHER'))
+        sent = json.loads(self.run_tool('--json', 'send', first, 'hello', '--session', 'codex-main-0001'))
+        self.assertEqual(sent['to'], [first])
+        inbox = json.loads(self.run_tool('--json', 'inbox', '--session', first))
+        self.assertEqual(inbox[0]['text'], 'hello')
+        ambiguous = subprocess.run([sys.executable, str(TOOL), 'send', 'same-prefix-1', 'hello',
+                                    '--session', 'codex-main-0001'], env=self.env,
+                                   capture_output=True, text=True, timeout=30, check=False)
+        self.assertNotEqual(ambiguous.returncode, 0)
+        self.assertIn('matches 2 sessions', ambiguous.stderr)
+
+    def test_host_filter_only_scans_selected_backend(self):
+        from unittest.mock import patch
+
+        import agent_sessions
+        with patch('agent_sessions.codex_sessions') as codex, \
+                patch('agent_sessions.claude_sessions') as claude, \
+                patch('agent_sessions.agy_sessions', return_value=[]) as agy, \
+                patch('agent_sessions.all_pairs', return_value=[]):
+            self.assertEqual(agent_sessions.sessions(host='agy'), [])
+        self.assertEqual(codex.call_count, 0)
+        self.assertEqual(claude.call_count, 0)
+        self.assertEqual(agy.call_count, 1)
+
+    def test_empty_filtered_discovery_uses_matching_language(self):
+        self.assertEqual(self.run_tool('list', '--match', 'no-such-session').strip(),
+                         'No matching recent sessions.')
+        result = self.run_tool('who', str(self.repo), '--host', 'agy')
+        self.assertIn('No matching recent sessions.', result)
+        self.assertNotIn('No other active session works', result)
+        payload = json.loads(self.run_tool('--json', 'list', '--match', 'no-such-session'))
+        self.assertEqual(payload, [])
+
+    def test_cli_version_reports_release_version(self):
+        self.assertEqual(self.run_tool('--version').strip(), 'agent-sessions 0.3.0')
+
+    def test_complete_retains_pair_and_hides_only_closed_worker(self):
+        pair = json.loads(self.run_tool('partner', 'attach', 'codex-sub-0002',
+                                        '--session', 'codex-main-0001'))
+        completed = json.loads(self.run_tool('partner', 'complete', pair['id'],
+                                             '--session', 'codex-main-0001'))
+        self.assertEqual(completed['status'], 'completed')
+        self.assertEqual(completed['completion']['native_state'], 'retained')
+        self.assertEqual(json.loads(self.run_tool('partner', 'complete', pair['id'])), completed)
+        self.assertEqual(json.loads(self.run_tool('partner', 'show', pair['id'])), completed)
+        listed = json.loads(self.run_tool('--json', 'list'))
+        self.assertNotIn('codex-sub-0002', [row['id'] for row in listed])
+        listed = json.loads(self.run_tool('--json', 'list', '--include-completed'))
+        self.assertIn('codex-sub-0002', [row['id'] for row in listed])
+        reopened = subprocess.run([sys.executable, str(TOOL), 'partner', 'connect', pair['id'],
+                                   'codex-sub-0002', '--session', 'codex-main-0001'],
+                                  env=self.env, capture_output=True, text=True, timeout=30, check=False)
+        self.assertNotEqual(reopened.returncode, 0)
+        fresh = json.loads(self.run_tool('partner', 'attach', 'codex-main-0001',
+                                         '--session', 'codex-sub-0002'))
+        self.assertNotEqual(fresh['id'], pair['id'])
+        self.assertIn('codex-sub-0002', [row['id'] for row in json.loads(self.run_tool('--json', 'list'))])
+
+    def test_complete_refuses_a_pair_held_by_another_run(self):
+        from unittest.mock import patch
+
+        import agent_sessions
+        pair = json.loads(self.run_tool('partner', 'attach', 'codex-sub-0002',
+                                        '--session', 'codex-main-0001'))
+        path = self.data / 'pairs' / (pair['id'] + '.json')
+        before = path.read_bytes()
+        with patch.dict(os.environ, self.env, clear=True), agent_sessions.locked(path):
+            result = subprocess.run([sys.executable, str(TOOL), 'partner', 'complete', pair['id']],
+                                    env=self.env, capture_output=True, text=True, timeout=5, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_claude_stop_requires_exact_done_background_job(self):
+        from unittest.mock import patch
+
+        import agent_sessions
+        session_id = '11111111-2222-4333-8444-555555555555'
+        pair = {'id': 'a' * 32, 'status': 'connected',
+                'caller': {'id': 'codex-main-0001', 'host': 'codex', 'cwd': str(self.repo)},
+                'partner': {'id': session_id, 'host': 'claude', 'cwd': str(self.worktree)}}
+        agent_path = self.data / 'pairs' / (pair['id'] + '.json')
+        agent_path.parent.mkdir(parents=True)
+        agent_path.write_text(json.dumps(pair))
+        row = {'kind': 'background', 'sessionId': session_id, 'id': 'a1b2c3d4',
+               'cwd': str(self.worktree), 'state': 'done'}
+        other = {'id': 'b' * 32, 'status': 'connected',
+                 'caller': {'id': session_id, 'host': 'claude', 'cwd': str(self.worktree)},
+                 'partner': {'id': 'codex-main-0001', 'host': 'codex', 'cwd': str(self.repo)}}
+        other_path = agent_path.parent / (other['id'] + '.json')
+        other_path.write_text(json.dumps(other))
+        with patch.dict(os.environ, self.env, clear=True), patch('agent_sessions.subprocess.run') as invoke:
+            with self.assertRaisesRegex(ValueError, 'another open pair'):
+                agent_sessions.complete_partner(pair['id'], stop=True)
+            self.assertEqual(invoke.call_count, 0)
+        other_path.unlink()
+        with patch.dict(os.environ, self.env, clear=True):
+            for invalid in ([dict(row, state='blocked')], [row, dict(row)], [dict(row, kind='interactive')]):
+                with self.subTest(invalid=invalid), patch('agent_sessions.subprocess.run',
+                        return_value=subprocess.CompletedProcess([], 0, json.dumps(invalid), '')) as invoke:
+                    with self.assertRaises(ValueError):
+                        agent_sessions.complete_partner(pair['id'], stop=True)
+                    self.assertEqual(invoke.call_count, 1)
+                    self.assertEqual(json.loads(agent_path.read_text())['status'], 'connected')
+            responses = [subprocess.CompletedProcess([], 0, json.dumps([row]), ''),
+                         subprocess.CompletedProcess([], 0, '', '')]
+            with patch('agent_sessions.subprocess.run', side_effect=responses) as invoke:
+                result = agent_sessions.complete_partner(pair['id'], stop=True)
+            self.assertEqual(invoke.call_args_list[1].args[0], ['claude', 'stop', 'a1b2c3d4'])
+            self.assertEqual(result['completion']['native_state'], 'stopped')
+
+    def test_complete_refuses_pending_and_unsuccessful_managed_run(self):
+        pair = json.loads(self.run_tool('partner', 'attach', 'codex-sub-0002',
+                                        '--session', 'codex-main-0001'))
+        path = self.data / 'pairs' / (pair['id'] + '.json')
+        for last_run in ({'status': 'unknown', 'turn_submitted': True}, {'status': 'failed'},
+                         {'status': 'attention', 'turn_submitted': False}):
+            pair['last_run'] = last_run
+            path.write_text(json.dumps(pair))
+            result = subprocess.run([sys.executable, str(TOOL), 'partner', 'complete', pair['id']],
+                                    env=self.env, capture_output=True, text=True, timeout=30, check=False)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(json.loads(path.read_text())['status'], 'connected')
+
     def test_lists_active_sessions_with_their_worktree_and_turn_state(self):
         found = {s["id"]: s for s in json.loads(self.run_tool("--json", "list"))}
         self.assertEqual(set(found), {"codex-main-0001", "codex-sub-0002", "claude-0006"})
@@ -576,6 +723,88 @@ class AgyHostTests(Machine):
             )
         db.commit()
         db.close()
+
+    def test_agy_alias_filter_and_direct_cross_host_queue(self):
+        self._write_agy_db([
+            ('agy-remote-0001', 'Research note', '', str(self.now),
+             json.dumps([self.repo.as_uri()]), 'CASCADE_RUN_STATUS_IDLE', '', '', 0, 0),
+        ])
+        rows = json.loads(self.run_tool('--json', 'who', str(self.repo), '--host', 'antigravity',
+                                        '--match', 'RESEARCH'))['sessions']
+        self.assertEqual([row['id'] for row in rows], ['agy-remote-0001'])
+        result = json.loads(self.run_tool('--json', 'send', 'agy-remote-0001', 'check this',
+                                          '--session', 'codex-main-0001'))
+        self.assertEqual(result['to'], ['agy-remote-0001'])
+        received = json.loads(self.run_tool('--json', 'inbox', '--session', 'agy-remote-0001'))
+        self.assertEqual(received[0]['text'], 'check this')
+        reply = json.loads(self.run_tool('--json', 'claim', received[0]['id'], 'received',
+                                         '--session', 'agy-remote-0001'))
+        self.assertEqual(reply['reply']['to'], 'codex-main-0001')
+        inbox = json.loads(self.run_tool('--json', 'inbox', '--session', 'codex-main-0001'))
+        self.assertEqual(inbox[0]['text'], 'received')
+        claude = json.loads(self.run_tool('--json', 'send', 'claude-0006', 'review',
+                                          '--session', 'agy-remote-0001'))
+        self.assertEqual(claude['to'], ['claude-0006'])
+        claude_inbox = json.loads(self.run_tool('--json', 'inbox', '--session', 'claude-0006'))
+        self.assertEqual(claude_inbox[0]['text'], 'review')
+
+    def test_exact_id_shared_by_hosts_is_ambiguous(self):
+        self._write_agy_db([
+            ('codex-main-0001', 'Other host', '', str(self.now),
+             json.dumps([self.repo.as_uri()]), 'CASCADE_RUN_STATUS_IDLE', '', '', 0, 0),
+        ])
+        result = subprocess.run([sys.executable, str(TOOL), 'send', 'codex-main-0001', 'hello',
+                                 '--session', 'claude-0006'], env=self.env, capture_output=True,
+                                text=True, timeout=30, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('matches 2 sessions', result.stderr)
+
+    def test_agy_databases_support_uri_special_characters(self):
+        self.agy = self.root / 'agy # percent%'
+        self.env['AGY_HOME'] = str(self.agy)
+        self._write_agy_db([
+            ('agy-special-0001', 'Special', '', str(self.now),
+             json.dumps([self.repo.as_uri()]), 'CASCADE_RUN_STATUS_IDLE', '', '', 0, 0),
+        ])
+        directory = self.agy / 'conversations'
+        directory.mkdir()
+        connection = sqlite3.connect(directory / 'agy-special-0001.db')
+        try:
+            connection.execute('create table steps (step_type int, step_payload blob)')
+            payload = b'replace_file_content' + json.dumps({'TargetFile': str(self.repo / 'a.txt')}).encode()
+            connection.execute('insert into steps values (?, ?)', (132, payload))
+            connection.commit()
+        finally:
+            connection.close()
+        rows = {row['id']: row for row in json.loads(self.run_tool('--json', 'list'))}
+        self.assertEqual(rows['agy-special-0001']['edited'], [str(self.repo / 'a.txt')])
+
+    def test_agy_hooks_preserve_unowned_handlers_across_installations(self):
+        from unittest.mock import patch
+
+        import agent_sessions
+        self.agy_config.mkdir(parents=True)
+        path = self.agy_config / 'hooks.json'
+        original = {'agent-sessions': {'extra': {'custom': True},
+            'SessionStart': [{'type': 'command', 'command': 'other-start'}],
+            'PreToolUse': [{'matcher': 'Read', 'hooks': [{'type': 'command', 'command': 'other-tool'}]}]}}
+        path.write_text(json.dumps(original))
+        old = str(self.root / 'old' / 'agent_sessions.py')
+        new = str(self.root / 'new' / 'agent_sessions.py')
+        with patch.dict(os.environ, self.env, clear=True):
+            with patch.object(agent_sessions, '__file__', old):
+                agent_sessions.configure_hooks('agy')
+            with patch.object(agent_sessions, '__file__', new):
+                agent_sessions.configure_hooks('agy')
+                installed = json.loads(path.read_text())
+                agent_sessions.configure_hooks('agy')
+                self.assertEqual(json.loads(path.read_text()), installed)
+            with patch.object(agent_sessions, '__file__', old):
+                agent_sessions.configure_hooks('agy', remove=True)
+                self.assertEqual(json.loads(path.read_text()), installed)
+            with patch.object(agent_sessions, '__file__', new):
+                agent_sessions.configure_hooks('agy', remove=True)
+        self.assertEqual(json.loads(path.read_text()), original)
 
     def test_discovers_agy_sessions_and_edited_files(self):
         now_iso = time.strftime("%Y-%m-%d %H:%M:%S+00:00", time.gmtime(self.now))

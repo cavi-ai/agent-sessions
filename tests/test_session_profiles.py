@@ -339,6 +339,31 @@ config = [{name = "painter", enabled = false}]
         self.assertEqual(rejected.returncode, 2)
         self.assertEqual(self.hook_for(profile).returncode, 0)
 
+    def test_failed_working_directory_change_restores_pair_and_cwd(self):
+        profile, _ = self.profile()
+        pair = json.loads(self.run_tool('partner', 'codex', str(self.worktree), 'brief',
+                                        '--profile', profile['id'], '--session', 'codex-main-0001'))
+        old_cwd = os.getcwd()
+        with patch.dict(os.environ, self.env, clear=True), \
+                patch('agent_sessions.os.chdir', side_effect=OSError('directory unavailable')):
+            with self.assertRaises(OSError):
+                agent_sessions.launch_profile(profile['id'], pair_id=pair['id'])
+            self.assertEqual(agent_sessions.read_pair(pair['id'])['status'], 'needs_profile_launch')
+        self.assertEqual(os.getcwd(), old_cwd)
+
+    def test_missing_native_executable_restores_launchable_pair(self):
+        profile, _ = self.profile()
+        pair = json.loads(self.run_tool('partner', 'codex', str(self.worktree), 'brief',
+                                        '--profile', profile['id'], '--session', 'codex-main-0001'))
+        empty = self.root / 'empty-path'
+        empty.mkdir()
+        result = subprocess.run([sys.executable, str(TOOL), 'profile', 'launch', profile['id'],
+                                 '--pair', pair['id']], env={**self.env, 'PATH': str(empty)},
+                                capture_output=True, text=True, timeout=30, check=False)
+        self.assertNotEqual(result.returncode, 0)
+        restored = json.loads(self.run_tool('partner', 'show', pair['id']))
+        self.assertEqual(restored['status'], 'needs_profile_launch')
+
     def test_real_launcher_executes_argv_and_records_pending_creation(self):
         profile, _ = self.profile()
         pair = json.loads(self.run_tool('partner','codex',str(self.worktree),

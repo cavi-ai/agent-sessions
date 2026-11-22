@@ -1,7 +1,9 @@
 # Version and support
 
 This documentation covers Agent Sessions {{PRODUCT_VERSION}}.
-The package version is declared in `pyproject.toml`.
+The package version is declared in `pyproject.toml`. Source checkout pages may describe unreleased features. Use the matching release
+artifact for a tagged release. The earlier `v0.2.0` tag does not include
+Antigravity, managed local-provider mode or marketplace package manifests.
 
 ## Requirements and compatibility
 
@@ -10,11 +12,12 @@ The package version is declared in `pyproject.toml`.
 | Python | 3.9 or newer; 3.9 and 3.10 install `tomli` for TOML parsing |
 | Operating system | macOS or Linux; POSIX file locking is required |
 | Git | Installed and available on `PATH` for repository inspection |
-| Codex and Claude Code | Installed separately; discovery depends on their local record formats |
+| Codex and Claude Code | Installed separately. Discovery depends on their local record formats |
+| Antigravity (`agy`) | Installed separately; discovery depends on local record formats |
 | Codex app partner creation | Requires saved local projects and the native app tools |
 | Worker profiles | Require supplied native configuration plus loaded, trusted hooks |
 
-Missing hosts do not prevent using the other host. Discovery shows recent records
+Missing hosts do not prevent using the other hosts. Discovery shows recent records
 and cannot establish process liveness. Database, transcript and hook interfaces
 can change with native host updates.
 

@@ -93,11 +93,14 @@ and hooks. Attachment does not apply a profile to an ordinary open chat.
 ```sh
 agent-sessions partner run PAIR_ID --timeout 60
 agent-sessions partner run PAIR_ID --prompt-file /path/to/prompt.txt --timeout 60
+agent-sessions partner run PAIR_ID --complete --archive --metrics
 agent-sessions partner show PAIR_ID
 ```
 
 `partner run` owns one App Server process and checks the profile directly, without
-command hooks. The pinned Codex profile must disable `features.hooks`,
+command hooks. `--complete` records the finished pair, `--archive` requests native
+Codex archival after completion, and `--metrics` includes native turn metrics when
+available. The pinned Codex profile must disable `features.hooks`,
 `features.apps`, `features.plugins`, `features.skill_search`, `features.memories` and
 `skills.include_instructions`. Every enabled MCP server must declare `enabled_tools`.
 Unexpected inherited servers or discovered tools prevent assignment. Model and
@@ -176,7 +179,10 @@ available.
 
 For a managed turn, `--local-provider` reads the model and selected provider from
 the pinned `.codex/config.toml`. The provider must use a literal loopback HTTP
-address, the Responses API and a key supplied by environment variable:
+address (`127.0.0.1` or `[::1]` with an explicit port), the Responses API and a
+nonempty key supplied by environment variable. The pinned configuration must
+select exactly one custom provider. Its name must be a simple custom name other
+than `openai`, `ollama` or `lmstudio`:
 
 ```toml
 model = "your-local-model"
@@ -191,13 +197,14 @@ requires_openai_auth = false
 supports_websockets = false
 ```
 
-Set `LOCAL_GATEWAY_KEY` in the runner's environment, then run:
+Supply `LOCAL_GATEWAY_KEY` only in the managed runner's environment, then run:
 
 ```sh
 agent-sessions partner run PAIR_ID --local-provider
 ```
 
-Managed local mode disables reasoning summaries and hosted web search. An optional
+Managed local mode disables reasoning summaries and hosted web search. Account
+authentication and WebSockets must be disabled. Both default to false. An optional
 `stream_max_retries` integer from 0 to 5 pins the provider stream retry limit.
 The runner checks the effective model and provider before assignment. Resume with
 the same option and pinned provider. The key value is not included in the profile
@@ -211,7 +218,9 @@ task:
 - **Tool-free / zero-MCP**: Pin a custom agent with
   `excludeDefaultComponents: true` and `inheritCustomizations: false` alongside
   an empty `.agents/mcp_config.json` (`{"mcpServers": {}}`). Best for pure
-  classification, review, or audit workers that read inline input.
+  classification, review, or audit workers that read inline input. This can also
+  exclude global customizations containing guard hooks. Hook protection applies
+  only when the host loads those hooks.
 - **Scoped-tools + guarded hooks**: Keep `inheritCustomizations: true` so
   global hooks stay active, set `inheritMcp: false`, and restrict built-in
   capabilities with an explicit `tools: [...]` list.
@@ -232,10 +241,8 @@ Measured in live Antigravity (`agy`) runs using `Gemini 3.8 Flash (Low)` across
 | Profiled scoped-tools + guarded hooks (`scoped-tools`) | 39,849 | 43,971 | **82.6% input / 81.0% total** | 23.43s | 5/5 accuracy, 5/5 live hook bindings |
 | Profiled scoped-MCP + hooks (`scoped-mcp`) | ~10,271 / worker | ~11,504 / worker | **~77.5% input** vs unprofiled with-tools | — | Live scoped MCP calls + hook bindings |
 
-Stripping inherited global tools, plugins, and MCP schemas removes tens of
-thousands of irrelevant tokens per worker before turn 1. That delays context rot
-across multi-turn work and makes high-concurrency parallel fanouts practical
-even on smaller-context local models.
+These measurements cover the selected security-audit tasks and Antigravity
+configurations.
 
 ## What the launcher preserves
 
@@ -246,12 +253,15 @@ settings as native `-c` overrides. Antigravity launches pass `--settings` for
 `.agents/settings.json`, `--agent` when a custom agent file is pinned,
 `--disable-slash-commands` when `disableSlashCommands: true` is set, and
 `--conversation` on resume; `.agents/settings.json` must not define `hooks`.
-Launchers strip foreign host session variables and carry the same profile marker
-across start and resume.
+Native launchers carry the same profile marker across start and resume. Both
+native launches and managed Codex runs inherit the caller’s environment with
+known host session variables removed. Scope credentials to the runner that needs
+them.
 
 Capability overrides are visible in process arguments and dry-run output. Keep
-secrets out of capability settings, URLs and command arguments. Nonempty MCP
-`env`, `http_headers` and `bearer_token` values are rejected. Use native references:
+secrets out of capability settings, URLs and command arguments. Codex capability
+overrides reject nonempty MCP `env`, `http_headers` and `bearer_token` values.
+Use native references:
 
 - `env_vars` for environment variables forwarded to a stdio server.
 - `env_http_headers` for headers populated from environment variables.
@@ -262,10 +272,12 @@ Reference values are not expanded into launch arguments. See the official
 
 ## Limits of the check
 
-A profile verifies its supplied files and launch context. It does not prove the
-host's effective tool catalog or provide a security sandbox. Native managed
-settings and tool paths outside hook coverage can affect behavior. Keep native
-permissions and mandatory project instructions in force.
+A profile verifies its supplied files and launch context. Native host launches
+select settings and tools through that host. The host controls its effective
+tool catalog. Managed Codex runs separately check the effective MCP tool
+inventory before assignment, but do not inspect the full prompt or provide a
+security sandbox. Native settings and tool paths outside hook coverage can affect
+behavior. Keep native permissions and mandatory project instructions in force.
 
 Keep profile and binding data intact. Removing that metadata can lose the record
 needed to check or resume a worker. For recovery steps, see

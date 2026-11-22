@@ -1,5 +1,9 @@
 # Overview
 
+The earlier `v0.2.0` release does not include Antigravity, managed local-provider
+mode or marketplace package manifests. Use documentation from the matching tag
+or release artifact for a published release.
+
 Agent Sessions helps Codex, Claude Code, and Antigravity (`agy`) sessions
 coordinate on one machine. It discovers recent sessions, compares their Git
 checkouts, and passes messages through a local queue. It also records partner
@@ -41,13 +45,11 @@ Claude or Antigravity partner queues a path invitation; creating an ordinary
 Codex partner uses the Codex app's native tools. [Partner sessions](../guides/partners.md)
 explains both routes.
 
-A **profile** pins explicitly supplied configuration files and a directory so
-each worker starts with only the tools, custom agent settings, and MCP servers
-it needs. In multi-agent fanouts, stripping inherited global schemas prevents
-context rot and dramatically reduces token usage; see the
-[measured 5-agent fanout benchmarks](../guides/profiles.md#measured-5-agent-fanout-benchmarks).
-Profiles check launch context and configuration hashes; they do not authenticate
-workers or establish which tools a host actually exposes.
+A **profile** pins explicitly supplied configuration files and a directory. Native
+launchers pass the selected settings to the host, which controls the tools it exposes.
+Managed Codex runs additionally check the effective MCP tool inventory before
+assignment. See the [measured 5-agent fanout runs](../guides/profiles.md#measured-5-agent-fanout-benchmarks)
+for results from specific configurations. Profiles do not authenticate workers.
 
 ## Next steps
 

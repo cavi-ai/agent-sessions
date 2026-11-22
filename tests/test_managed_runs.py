@@ -7,8 +7,12 @@ import signal
 import subprocess
 import sys
 import time
+import unittest
+from unittest.mock import patch
 
 from test_agent_sessions import ROOT, TOOL, Machine
+
+import managed_runs
 
 
 class ManagedRunTests(Machine):
@@ -92,6 +96,7 @@ memories = false
 include_instructions = false
 [mcp_servers.fixture]
 command = "fixture"
+env_vars = ["TEST_RPC_STATE"]
 enabled_tools = ["inspect"]
 '''
 
@@ -101,6 +106,20 @@ enabled_tools = ["inspect"]
                                  '--timeout', '5', '--local-provider'], env=self.env, check=False,
                                 capture_output=True, text=True, timeout=15)
         return json.loads(result.stdout)
+
+    def test_local_subprocess_receives_only_scoped_environment(self):
+        self.repin(self.local_config().replace(
+            'env_vars = ["TEST_RPC_STATE"]', 'env_vars = ["TEST_RPC_STATE", "MCP_TOKEN"]'))
+        self.env.update(MCP_TOKEN='scoped', OTHER_TOKEN='unrelated')
+        fixture = ROOT / 'tests/fixtures/codex_app_server.py'
+        binary = self.root / 'bin/codex'
+        binary.write_text('#!'+sys.executable+'\nimport json, os, runpy\n'
+            'p=os.environ["TEST_RPC_STATE"]\n'
+            's=json.load(open(p)); s["env_names"]=[k for k in ("LOCAL_GATEWAY_KEY", "MCP_TOKEN", "OTHER_TOKEN") if k in os.environ]\n'
+            'open(p,"w").write(json.dumps(s))\n'
+            'runpy.run_path('+repr(str(fixture))+', run_name="__main__")\n')
+        self.assertEqual(self.run_local()['status'], 'completed')
+        self.assertEqual(self.native()['env_names'], ['LOCAL_GATEWAY_KEY', 'MCP_TOKEN'])
 
     def test_local_provider_config_checked_and_persisted_for_resume(self):
         self.repin(self.local_config())
@@ -225,6 +244,99 @@ enabled_tools = ["inspect"]
             if request['method'] == 'turn/start':
                 self.assertEqual(request['params']['input'],
                     [{'type': 'text', 'text': self.pair['brief']}])
+
+    def run_complete(self, *flags):
+        return subprocess.run([sys.executable, str(TOOL), 'partner', 'run', self.pair['id'],
+                               '--timeout', '5', *flags], env=self.env, capture_output=True,
+                              text=True, timeout=15, check=False)
+
+    def test_complete_persists_finished_turn_and_blocks_replay(self):
+        result = self.run_complete('--complete')
+        receipt = json.loads(result.stdout)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(receipt['completion']['native_state'], 'closed')
+        pair = json.loads(self.run_tool('partner', 'show', self.pair['id']))
+        self.assertEqual(pair['status'], 'completed')
+        self.assertEqual(pair['last_run']['status'], 'completed')
+        self.assertEqual(pair['completion']['native_state'], 'closed')
+        self.assertEqual(self.run_pair()['status'], 'attention')
+        self.assertEqual(self.methods().count('turn/start'), 1)
+        self.assertNotIn('thread/archive', self.methods())
+
+    def test_archive_after_completed_turn_uses_same_thread(self):
+        result = self.run_complete('--complete', '--archive')
+        receipt = json.loads(result.stdout)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(receipt['completion']['native_state'], 'archived')
+        requests = self.native()['requests']
+        archive = next(r for r in requests if r['method'] == 'thread/archive')
+        self.assertEqual(archive['params'], {'threadId': receipt['session_id']})
+        self.assertLess(self.methods().index('turn/start'), self.methods().index('thread/archive'))
+        self.assertEqual(json.loads(self.run_tool('partner', 'show', self.pair['id']))['completion']['native_state'], 'archived')
+        self.assertEqual(self.run_pair()['status'], 'attention')
+
+    def test_archive_keeps_worker_when_another_pair_references_it(self):
+        other = dict(self.pair)
+        other['id'] = 'a'*32
+        other['status'] = 'connected'
+        other['partner'] = dict(other['partner'], id='11111111-1111-4111-8111-111111111111')
+        (self.data/'pairs'/(other['id']+'.json')).write_text(json.dumps(other))
+        result = self.run_complete('--complete', '--archive')
+        receipt = json.loads(result.stdout)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(receipt['completion']['native_state'], 'archive_failed')
+        self.assertNotIn('thread/archive', self.methods())
+        self.assertEqual(json.loads(self.run_tool('partner', 'show', self.pair['id']))['status'], 'completed')
+
+    def test_archive_failure_keeps_finished_receipt_and_blocks_replay(self):
+        fixture = (ROOT / 'tests/fixtures/codex_app_server.py').read_text()
+        fixture = fixture.replace("    elif method == 'turn/interrupt':",
+            "    elif method == 'thread/archive':\n        reject(request, -32603, 'archive failed')\n        continue\n    elif method == 'turn/interrupt':")
+        modified = self.root / 'archive-server.py'
+        modified.write_text(fixture.replace("sys.path.insert(0, str(Path(__file__).resolve().parents[2]))",
+                                            'sys.path.insert(0, '+repr(str(ROOT))+')'))
+        binary = self.root / 'bin/codex'
+        binary.write_text('#!'+sys.executable+'\nimport runpy\nrunpy.run_path('+repr(str(modified))+', run_name="__main__")\n')
+        result = self.run_complete('--complete', '--archive')
+        receipt = json.loads(result.stdout)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(receipt['status'], 'completed')
+        self.assertEqual(receipt['completion']['native_state'], 'archive_failed')
+        pair = json.loads(self.run_tool('partner', 'show', self.pair['id']))
+        self.assertEqual(pair['last_run']['status'], 'completed')
+        self.assertEqual(pair['completion']['native_state'], 'archive_failed')
+        self.assertEqual(self.run_pair()['status'], 'attention')
+        self.assertEqual(self.methods().count('turn/start'), 1)
+
+    def test_metrics_include_early_owned_events_without_other_turns(self):
+        fixture = (ROOT / 'tests/fixtures/codex_app_server.py').read_text()
+        before = "        send({'id': request['id'], 'result': {'turn': turn}})"
+        injected = ("        send({'method':'item/agentMessage/delta','params':{'threadId':thread_id,"
+                    "'turnId':'other','delta':'other'}})\n"
+                    "        send({'method':'item/agentMessage/delta','params':{'threadId':thread_id,"
+                    "'turnId':turn['id'],'delta':'first'}})\n"
+                    "        send({'method':'thread/tokenUsage/updated','params':{'threadId':thread_id,"
+                    "'turnId':turn['id'],'tokenUsage':{'last':{'inputTokens':21,"
+                    "'cachedInputTokens':13,'outputTokens':3}}}})\n")
+        self.assertIn(before, fixture)
+        fixture = fixture.replace(before, injected+before)
+        fixture = fixture.replace("sys.path.insert(0, str(Path(__file__).resolve().parents[2]))",
+                                  'sys.path.insert(0, '+repr(str(ROOT))+')')
+        modified = self.root / 'metrics-server.py'
+        modified.write_text(fixture)
+        binary = self.root / 'bin/codex'
+        binary.write_text('#!'+sys.executable+'\nimport runpy\nrunpy.run_path('+repr(str(modified))+', run_name="__main__")\n')
+        result = self.run_complete('--metrics')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        metrics = json.loads(result.stdout)['metrics']
+        self.assertGreaterEqual(metrics['time_to_first_text_ms'], 0)
+        self.assertEqual(metrics['latest_request_usage'],
+                         {'input_tokens': 21, 'cached_input_tokens': 13, 'output_tokens': 3})
+
+    def test_metrics_omitted_when_no_events_arrive(self):
+        result = self.run_complete('--metrics')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn('metrics', json.loads(result.stdout))
 
     def test_inherited_raw_server_blocks_before_thread_creation(self):
         self.native(unexpected_raw=True)
@@ -642,3 +754,36 @@ enabled_tools = ["inspect"]
         {'version':1,'managed_run':{'mcp_call_receipts':'canonical-json-sha256',
             'maximum_mcp_calls':64,'memory_context':'disabled-before-first-turn'}})
         self.assertEqual(self.methods(),[])
+
+
+class ScopedEnvironmentTests(unittest.TestCase):
+    def test_local_environment_only_passes_explicit_references(self):
+        config = {'mcp_servers': {'enabled': {'env_vars': ['MCP_TOKEN'],
+            'env_http_headers': {'Authorization': 'HEADER_TOKEN'}, 'bearer_token_env_var': 'BEARER_TOKEN'},
+            'disabled': {'enabled': False, 'env_vars': ['DISABLED_TOKEN']}}}
+        values = {'HOME': '/home/test', 'PATH': '/bin', 'LOCAL_KEY': 'one', 'MCP_TOKEN': 'two',
+                  'HEADER_TOKEN': 'three', 'BEARER_TOKEN': 'four', 'OTHER_TOKEN': 'five',
+                  'DISABLED_TOKEN': 'six', 'CODEX_THREAD_ID': 'foreign'}
+        with patch.dict(os.environ, values, clear=True):
+            result = managed_runs.local_child_env({'provider': {'env_key': 'LOCAL_KEY'}}, config)
+        self.assertEqual(result, {key: values[key] for key in
+            ('HOME', 'PATH', 'LOCAL_KEY', 'MCP_TOKEN', 'HEADER_TOKEN', 'BEARER_TOKEN')})
+
+
+class ManagedMetricsTests(unittest.TestCase):
+    def test_early_events_bind_only_to_owned_thread_and_turn(self):
+        metrics = managed_runs.TurnMetrics('thread-owned', 10.0)
+        metrics.observe({'method': 'item/agentMessage/delta', 'params': {
+            'threadId': 'other', 'turnId': 'turn-1', 'delta': 'wrong'}}, 10.1)
+        metrics.observe({'method': 'item/agentMessage/delta', 'params': {
+            'threadId': 'thread-owned', 'turnId': 'turn-2', 'delta': 'other'}}, 10.2)
+        metrics.observe({'method': 'item/agentMessage/delta', 'params': {
+            'threadId': 'thread-owned', 'turnId': 'turn-1', 'delta': 'text'}}, 10.3)
+        metrics.observe({'method': 'thread/tokenUsage/updated', 'params': {
+            'threadId': 'thread-owned', 'turnId': 'turn-1', 'tokenUsage': {'last': {
+                'inputTokens': 21, 'cachedInputTokens': 13, 'outputTokens': 3}}}}, 10.5)
+        self.assertEqual(metrics.result('turn-1'), {'time_to_first_text_ms': 300,
+            'latest_request_usage': {'input_tokens': 21, 'cached_input_tokens': 13, 'output_tokens': 3}})
+
+    def test_missing_events_are_not_reported(self):
+        self.assertEqual(managed_runs.TurnMetrics('thread', 1.0).result('turn'), {})
