@@ -12,13 +12,21 @@ Put the intended native settings in the worker directory before creating a profi
 | --- | --- |
 | Codex | `.codex/config.toml` |
 | Claude Code | `.claude/settings.local.json` and `.mcp.json` |
+| Antigravity (`agy` / `antigravity`) | `.agents/settings.json` and `.agents/mcp_config.json` (optional `.agents/agents/<name>/agent.md` or `.agents/agents/<name>.md`) |
 
 Pin the directory, using a short profile name:
 
 ```sh
 agent-sessions profile create codex /path/to/worker modeler
 agent-sessions profile create claude /path/to/worker reviewer
+agent-sessions profile create agy /path/to/worker auditor
 ```
+
+For Antigravity, if `.agents/agents/<name>/agent.md` or `.agents/agents/<name>.md`
+matches the profile name, `profile create agy` pins it automatically (or pass it
+explicitly with `--file`). Each `agy` profile supports at most one custom agent
+file; its YAML frontmatter `name` must match the file path and cannot set
+`mainAgent: false`. The `antigravity` host alias is accepted anywhere `agy` is.
 
 Each command returns a profile ID. To pin additional relative configuration or
 skill files, repeat `--file`:
@@ -40,7 +48,8 @@ agent-sessions profile launch PROFILE_ID --pair PAIR_ID --dry-run
 agent-sessions profile launch PROFILE_ID --pair PAIR_ID
 ```
 
-Use `partner claude` for a Claude profile. Profiled partners return a guarded
+Use `partner claude` for a Claude profile or `partner agy` for an Antigravity
+profile. Profiled partners return a guarded
 launch command rather than an ordinary app creation request or path invitation.
 Run the launch once. The bootstrap connects the session before receiving the work;
 the requested task remains in the pair's `brief` until the caller sends it.
@@ -59,6 +68,15 @@ For a session already bound to a profile, the equivalent direct route is:
 
 ```sh
 agent-sessions profile launch PROFILE_ID --resume SESSION_ID
+```
+
+For Antigravity (`agy`) profiles, `profile launch` and `partner resume` also
+support non-interactive headless execution with `--print 'PROMPT'`, `--headless`,
+and `--output-format text|json|stream-json` (not combinable with initial `--pair`
+bootstrap):
+
+```sh
+agent-sessions profile launch PROFILE_ID --print 'Audit src/auth.py' --output-format json
 ```
 
 Bare reopening, changed configuration, a wrong directory or damaged bindings block
@@ -185,12 +203,51 @@ The runner checks the effective model and provider before assignment. Resume wit
 the same option and pinned provider. The key value is not included in the profile
 or launch arguments.
 
+## Starting-context profile tiers (Antigravity)
+
+Controlling what a worker inherits at startup lets you match context size to the
+task:
+
+- **Tool-free / zero-MCP**: Pin a custom agent with
+  `excludeDefaultComponents: true` and `inheritCustomizations: false` alongside
+  an empty `.agents/mcp_config.json` (`{"mcpServers": {}}`). Best for pure
+  classification, review, or audit workers that read inline input.
+- **Scoped-tools + guarded hooks**: Keep `inheritCustomizations: true` so
+  global hooks stay active, set `inheritMcp: false`, and restrict built-in
+  capabilities with an explicit `tools: [...]` list.
+- **Scoped-MCP**: Declare only the required servers under `mcpServers` in the
+  pinned `.agents/mcp_config.json` and grant them in the agent definition via
+  `mcpServers: [...]` while keeping guarded hooks active.
+
+## Measured 5-agent fanout benchmarks
+
+Measured in live Antigravity (`agy`) runs using `Gemini 3.8 Flash (Low)` across
+5 concurrent security-audit workers:
+
+| Configuration | Input tokens | Total tokens | Savings vs baseline | Wall time | Verification |
+| --- | ---: | ---: | --- | ---: | --- |
+| Unprofiled baseline (inline) | 111,452 | 112,961 | — | 22.50s | 5/5 accuracy |
+| Profiled tool-free (`notools`) | 3,775 | 7,389 | **96.6% input / 93.5% total** | 14.70s (1.53x faster) | 5/5 accuracy |
+| Unprofiled with tools (2-turn) | 228,667 | 231,387 | — | 27.64s | 5/5 accuracy |
+| Profiled scoped-tools + guarded hooks (`scoped-tools`) | 39,849 | 43,971 | **82.6% input / 81.0% total** | 23.43s | 5/5 accuracy, 5/5 live hook bindings |
+| Profiled scoped-MCP + hooks (`scoped-mcp`) | ~10,271 / worker | ~11,504 / worker | **~77.5% input** vs unprofiled with-tools | — | Live scoped MCP calls + hook bindings |
+
+Stripping inherited global tools, plugins, and MCP schemas removes tens of
+thousands of irrelevant tokens per worker before turn 1. That delays context rot
+across multi-turn work and makes high-concurrency parallel fanouts practical
+even on smaller-context local models.
+
 ## What the launcher preserves
 
-Both hosts use their configured model and native permission settings. Claude
-launches repeat the settings and MCP file paths with `--strict-mcp-config`.
-Codex repeats pinned app, feature, MCP, plugin and skill settings as native `-c`
-overrides. Both start and resume carry the same profile marker.
+All three hosts use their configured model and native permission settings.
+Claude launches repeat the settings and MCP file paths with
+`--strict-mcp-config`. Codex repeats pinned app, feature, MCP, plugin and skill
+settings as native `-c` overrides. Antigravity launches pass `--settings` for
+`.agents/settings.json`, `--agent` when a custom agent file is pinned,
+`--disable-slash-commands` when `disableSlashCommands: true` is set, and
+`--conversation` on resume; `.agents/settings.json` must not define `hooks`.
+Launchers strip foreign host session variables and carry the same profile marker
+across start and resume.
 
 Capability overrides are visible in process arguments and dry-run output. Keep
 secrets out of capability settings, URLs and command arguments. Nonempty MCP

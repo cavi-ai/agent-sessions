@@ -85,8 +85,8 @@ and queues where your workflow needs them.
 
 | Surface | Current support |
 | --- | --- |
-| Native sessions | Codex and Claude Code discovery, messaging and partner records |
-| Profiled workers | Pinned configuration with guarded launch and resume for both hosts |
+| Native sessions | Codex, Claude Code, and Antigravity (`agy`) discovery, messaging and partner records |
+| Profiled workers | Pinned configuration with guarded launch and resume for all three hosts |
 | Managed turns | Codex App Server execution, scope checks and saved run receipts |
 | Supervising harnesses | CLI contracts and `resource_client.ResourceClient` for resource admission, lifecycle events and checkpoint/resume |
 
@@ -103,6 +103,29 @@ and launch context.
 
 [Security model](docs/agent-sessions/source/pages/security/model.md) ·
 [Worker configuration](docs/agent-sessions/source/pages/guides/profiles.md)
+
+## Why starting-context profiles matter (5-agent fanout benchmark)
+
+When you fan out parallel workers, every worker inherits your global tool
+schemas, plugins, and MCP servers by default. That startup overhead compounds
+across every worker and turn, accelerating context rot and crowding out the
+actual task—especially on smaller-context local models and high-concurrency
+fanouts.
+
+Measured on a live 5-agent concurrent security-audit fanout in Antigravity
+(`agy`, `Gemini 3.8 Flash (Low)`):
+
+| Profile tier | Input tokens | Total tokens | Input savings | Wall time | Accuracy |
+| --- | ---: | ---: | ---: | ---: | :---: |
+| Unprofiled baseline (inline) | 111,452 | 112,961 | — | 22.50s | 5/5 |
+| Profiled tool-free (`notools`) | 3,775 | 7,389 | **96.6%** | 14.70s (1.53x faster) | 5/5 |
+| Unprofiled with tools (2-turn) | 228,667 | 231,387 | — | 27.64s | 5/5 |
+| Profiled scoped-tools + guarded hooks (`scoped-tools`) | 39,849 | 43,971 | **82.6%** | 23.43s | 5/5 |
+
+Pinning a minimal starting context cuts fanout input tokens by **96.6%** for
+tool-free workers and **82.6%** for scoped-tools workers while keeping live
+hook guards enforced. See [Worker profiles](docs/agent-sessions/source/pages/guides/profiles.md)
+for profile tiers, scoped-MCP results, and setup examples.
 
 ## Documentation and help
 

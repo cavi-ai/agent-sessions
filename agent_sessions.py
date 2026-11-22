@@ -18,8 +18,9 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.parse
 import uuid
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -28,16 +29,63 @@ import session_profiles as profiles
 ACTIVE_MINUTES = 30
 TAIL_BYTES = 2_000_000
 GIT_TIMEOUT = 5
+HOSTS = ("codex", "claude", "agy")
+HOST_CHOICES = ("codex", "claude", "agy", "antigravity")
 EDIT_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
-HOOK_EVENTS = ("SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse")
+AGY_EDIT_TOOLS = ("write_to_file", "replace_file_content", "multi_replace_file_content",
+                  "notebook_edit", "edit_notebook", "sed_file")
+HOOK_EVENTS = ("SessionStart", "UserPromptSubmit", "PreInvocation", "PreToolUse", "PostToolUse")
+NATIVE_HOOK_EVENTS = ("SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse")
+FOREIGN_SESSION_ENVS = ("CODEX_THREAD_ID", "CLAUDE_CODE_SESSION_ID", "CLAUDE_PID",
+                        "ANTIGRAVITY_CONVERSATION_ID", "ANTIGRAVITY_AGENT")
+
+
+def _nearer_host(present):
+    target = os.environ.get("CLAUDE_PID", "")
+    claude_pid = int(target) if target.isdigit() else None
+    pid = os.getppid()
+    for _ in range(64):
+        if claude_pid is not None and pid == claude_pid and "claude" in present:
+            return "claude"
+        if pid <= 1:
+            return None
+        try:
+            out = subprocess.run(["ps", "-o", "ppid=,comm=", "-p", str(pid)], capture_output=True,
+                                 text=True, timeout=GIT_TIMEOUT, check=False).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            return None
+        parent, _, command = out.partition(" ")
+        base = os.path.basename(command.strip()).lower()
+        if "codex" in base and "codex" in present:
+            return "codex"
+        if "claude" in base and "claude" in present:
+            return "claude"
+        if (base == "agy" or "antigravity" in base) and "agy" in present:
+            return "agy"
+        if not parent.isdigit():
+            return None
+        pid = int(parent)
+    return None
 
 
 def environment_session_id():
-    """This process's session; when one host runs inside the other, the nearer host wins."""
-    codex, claude = os.environ.get("CODEX_THREAD_ID"), os.environ.get("CLAUDE_CODE_SESSION_ID")
-    if codex and claude and claude_is_nearer():
+    """This process's session; when one host runs inside another, the nearer host wins."""
+    codex = os.environ.get("CODEX_THREAD_ID")
+    claude = os.environ.get("CLAUDE_CODE_SESSION_ID")
+    agy = os.environ.get("ANTIGRAVITY_CONVERSATION_ID")
+    present = {k: v for k, v in (("codex", codex), ("claude", claude), ("agy", agy)) if v}
+    if len(present) <= 1:
+        return next(iter(present.values()), None)
+    if codex and claude and not agy and claude_is_nearer():
         return claude
-    return codex or claude
+    nearer = _nearer_host(present)
+    if nearer:
+        return present[nearer]
+    if claude and codex and claude_is_nearer():
+        return claude
+    if agy and os.environ.get("ANTIGRAVITY_AGENT") == "1":
+        return agy
+    return codex or claude or agy
 
 
 @functools.cache
@@ -64,9 +112,11 @@ def claude_is_nearer():
     return False
 
 
+SESSION_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,199}")
+
+
 def validate_session_id(session_id):
-    if not isinstance(session_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,199}",
-                                                         session_id):
+    if not isinstance(session_id, str) or not SESSION_ID_RE.fullmatch(session_id):
         raise ValueError("invalid session id; use letters, numbers, underscores and hyphens")
     return session_id
 
@@ -77,6 +127,15 @@ def codex_home():
 
 def claude_home():
     return Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
+
+
+def agy_home():
+    return Path(os.environ.get("AGY_HOME") or os.environ.get("ANTIGRAVITY_APP_DATA_DIR")
+                or Path.home() / ".gemini/antigravity-cli")
+
+
+def agy_config_dir():
+    return Path(os.environ.get("AGY_CONFIG_DIR") or Path.home() / ".gemini/config")
 
 
 def data_dir():
@@ -232,6 +291,186 @@ def claude_sessions(since, within=None):
     return sessions
 
 
+def _uri_to_path(uri):
+    if not isinstance(uri, str) or not uri:
+        return None
+    if uri.startswith("file://"):
+        return urllib.parse.unquote(urllib.parse.urlparse(uri).path)
+    return uri
+
+
+def _parse_timestamp(value):
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return value / 1000.0 if value > 1e12 else float(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            num = float(text)
+            return num / 1000.0 if num > 1e12 else num
+        except ValueError:
+            pass
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        match = re.match(
+            r"^(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2})\.(\d+)([+-]\d{2}:\d{2})?$",
+            text,
+        )
+        if match:
+            base, frac, tz = match.groups()
+            text = f"{base}.{(frac + '000000')[:6]}{tz or ''}"
+        try:
+            dt = datetime.fromisoformat(text)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.timestamp()
+        except ValueError:
+            return None
+    return None
+
+
+AGY_EDIT_PATH_KEYS = ("TargetFile", "target_file", "AbsolutePath", "file_path",
+                      "Path", "path", "NotebookPath", "notebook_path")
+AGY_STEP_PATH_RE = re.compile(
+    r'"(?:' + "|".join(AGY_EDIT_PATH_KEYS) + r')"\s*:\s*"((?:\\.|[^"\\])+)"'
+)
+
+
+def agy_edited(conversation_id):
+    if not isinstance(conversation_id, str) or not SESSION_ID_RE.fullmatch(conversation_id):
+        return []
+    edited = []
+    home_dir = agy_home()
+    transcript = home_dir / "brain" / conversation_id / ".system_generated/logs/transcript.jsonl"
+    if transcript.is_file():
+        for record in tail_records(transcript):
+            calls = record.get("tool_calls")
+            if not isinstance(calls, list):
+                continue
+            for call in calls:
+                if not isinstance(call, dict) or call.get("name") not in AGY_EDIT_TOOLS:
+                    continue
+                args = call.get("args") or call.get("arguments") or {}
+                if isinstance(args, str):
+                    try:
+                        args = json.loads(args)
+                    except ValueError:
+                        args = {}
+                if not isinstance(args, dict):
+                    continue
+                for key in AGY_EDIT_PATH_KEYS:
+                    val = args.get(key)
+                    if isinstance(val, str) and val:
+                        if len(val) >= 2 and val[0] == '"' and val[-1] == '"':
+                            try:
+                                val = json.loads(val)
+                            except ValueError:
+                                pass
+                        if isinstance(val, str) and val:
+                            edited.append(val)
+                            break
+    if not edited:
+        conv_db = home_dir / "conversations" / f"{conversation_id}.db"
+        if conv_db.is_file():
+            try:
+                with closing(sqlite3.connect(f"file:{conv_db}?mode=ro", uri=True, timeout=5)) as conn:
+                    cols = {row[1] for row in conn.execute("pragma table_info(steps)")}
+                    col = "step_payload" if "step_payload" in cols else (
+                        "payload" if "payload" in cols else None
+                    )
+                    if col:
+                        rows = conn.execute(f"select {col} from steps where step_type = 132").fetchall()
+                        for (payload,) in rows:
+                            if not payload:
+                                continue
+                            text = (payload.decode("utf-8", errors="ignore")
+                                    if isinstance(payload, (bytes, bytearray)) else str(payload))
+                            if not any(tool in text for tool in AGY_EDIT_TOOLS):
+                                continue
+                            for match in AGY_STEP_PATH_RE.finditer(text):
+                                try:
+                                    path_val = json.loads(f'"{match.group(1)}"')
+                                except ValueError:
+                                    path_val = match.group(1)
+                                if path_val:
+                                    edited.append(path_val)
+            except sqlite3.Error:
+                pass
+    return unique_last(edited)
+
+
+def agy_sessions(since, within=None):
+    db = agy_home() / "conversation_summaries.db"
+    if not db.is_file():
+        return []
+    try:
+        with closing(sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=5)) as conn:
+            cols = {row[1] for row in conn.execute("pragma table_info(conversation_summaries)")}
+            if not {"conversation_id", "last_modified_time", "workspace_uris"} <= cols:
+                return []
+            sel = [
+                "conversation_id",
+                "last_modified_time",
+                "workspace_uris",
+                "title" if "title" in cols else "''",
+                "preview" if "preview" in cols else "''",
+                "status" if "status" in cols else "''",
+                "parent_conversation_id" if "parent_conversation_id" in cols else "''",
+                "agent_name" if "agent_name" in cols else "''",
+                "not_fully_idle" if "not_fully_idle" in cols else "0",
+            ]
+            where = "where coalesce(killed, 0) = 0 " if "killed" in cols else ""
+            rows = conn.execute(
+                f"select {', '.join(sel)} from conversation_summaries "
+                f"{where}order by last_modified_time desc"
+            ).fetchall()
+    except sqlite3.Error as exc:
+        print(f"agent-sessions: cannot read {db}: {exc}", file=sys.stderr)
+        return []
+    found = []
+    for (cid, modified, uris_raw, title, preview, status_raw, parent_id,
+         agent_name, not_idle) in rows:
+        if not isinstance(cid, str) or not SESSION_ID_RE.fullmatch(cid):
+            continue
+        updated = _parse_timestamp(modified)
+        if updated is None or updated < since:
+            continue
+        cwd = None
+        try:
+            uris = json.loads(uris_raw) if isinstance(uris_raw, str) else uris_raw
+        except ValueError:
+            uris = []
+        if isinstance(uris, list):
+            for uri in uris:
+                candidate = _uri_to_path(uri)
+                if candidate:
+                    cwd = candidate
+                    break
+        if not cwd or (within and not inside(resolved(cwd), within)):
+            continue
+        status_val = ("running" if ("RUNNING" in str(status_raw or "").upper() or bool(not_idle))
+                      else "idle")
+        parent = parent_id or None
+        raw_label = (title or preview or "").strip()
+        label = (raw_label.splitlines() or [""])[0][:80] if raw_label else (agent_name or "")
+        role = "subagent" if parent else (agent_name or None)
+        found.append({
+            "host": "agy",
+            "id": cid,
+            "title": label,
+            "cwd": cwd,
+            "updated": updated,
+            "status": status_val,
+            "parent": parent,
+            "role": role,
+            "edited": agy_edited(cid),
+        })
+    return found
+
+
 def git(directory, *args):
     return subprocess.run(["git", "--no-optional-locks", "-c", "core.fsmonitor=false",
                            "-C", directory, *args], capture_output=True, text=True,
@@ -268,7 +507,9 @@ def git_state(cwd, cache=None):
 def sessions(minutes=ACTIVE_MINUTES, include_reviews=False, within=None):
     """Active sessions, newest first; within limits them to working directories under a path."""
     since = time.time() - minutes * 60
-    found = codex_sessions(since, include_reviews, within) + claude_sessions(since, within)
+    found = (codex_sessions(since, include_reviews, within)
+             + claude_sessions(since, within)
+             + agy_sessions(since, within))
     cache = {}
     for session in found:
         session["git"] = git_state(session["cwd"], cache)
@@ -492,7 +733,7 @@ def read_pair(pair_id):
     for key in ("caller", "partner"):
         end = pair.get(key)
         if (not isinstance(end, dict) or "id" not in end or
-                end.get("host") not in ("codex", "claude") or
+                end.get("host") not in HOSTS or
                 not isinstance(end.get("cwd"), str) or not Path(end["cwd"]).is_absolute()):
             raise ValueError(f"invalid pair endpoint: {pair_id}")
         if key == "caller" or pair["status"] == "connected" or end.get("id") is not None:
@@ -513,7 +754,10 @@ def all_pairs():
 
 
 def create_partner(host, directory, brief, caller_id, found, project_id=None, profile_id=None):
-    """Persist a native Codex creation request or a Claude path invitation."""
+    """Persist a native Codex creation request or a Claude/Antigravity path invitation."""
+    host = profiles.normalize_host(host)
+    if host not in HOSTS:
+        raise ValueError(f"unsupported partner host: {host}")
     caller = next((s for s in found if s["id"] == caller_id), None)
     if caller is None:
         raise ValueError("caller is not a discovered session; check --session and --minutes")
@@ -604,36 +848,46 @@ def attach_partner(session_id, caller_id, found, profile_id=None):
     return pair
 
 
-def launch_profile(profile_id, session_id=None, pair_id=None, dry_run=False):
+def launch_profile(profile_id, session_id=None, pair_id=None, dry_run=False,
+                   prompt=None, headless=False, output_format=None):
     profile = profiles.load(data_dir(), profile_id)
     if session_id:
         validate_session_id(session_id)
         receipt = profiles.binding(data_dir(), session_id)
         if not receipt or receipt['profile'] != profile_id:
             raise profiles.ProfileError('session is not bound to this profile')
-    prompt = None
     if pair_id:
         pair = read_pair(pair_id)
         if pair.get('profile') != profile_id:
             raise profiles.ProfileError('pair uses a different profile')
         if not session_id:
+            if headless or prompt is not None or output_format is not None:
+                raise profiles.ProfileError(
+                    'cannot combine --print/--headless with initial --pair bootstrap'
+                )
             if pair['status'] != 'needs_profile_launch':
-                raise profiles.ProfileError('partner launch outcome may exist; inspect and resume, never replay')
+                raise profiles.ProfileError(
+                    'partner launch outcome may exist; inspect and resume, never replay'
+                )
             prompt = pair['invitation']
-    command = profiles.argv(profile, session_id, prompt)
+    command = profiles.argv(profile, session_id, prompt, headless=headless,
+                            output_format=output_format)
     marker = {'AGENT_SESSIONS_PROFILE_ID': profile_id}
     if dry_run:
-        return {'profile':profile_id, 'host':profile['host'], 'cwd':profile['cwd'],
-                'argv':command, 'environment':marker}
+        return {'profile': profile_id, 'host': profile['host'], 'cwd': profile['cwd'],
+                'argv': command, 'environment': marker}
     if pair_id and not session_id:
         with locked(pair_path(pair_id)):
             pair = read_pair(pair_id)
             if pair['status'] != 'needs_profile_launch':
-                raise profiles.ProfileError('partner launch already attempted; inspect before retrying')
+                raise profiles.ProfileError(
+                    'partner launch already attempted; inspect before retrying'
+                )
             pair['status'] = 'profile_launch_pending'
             write_json(pair_path(pair_id), pair)
     env = {**os.environ, **marker}
-    env.pop('CLAUDE_CODE_SESSION_ID' if profile['host'] == 'codex' else 'CODEX_THREAD_ID', None)
+    for var in FOREIGN_SESSION_ENVS:
+        env.pop(var, None)
     os.chdir(profile['cwd'])
     os.execvpe(command[0], command, env)
 
@@ -947,42 +1201,65 @@ def describe_message(message):
             f"(reply session: {message.get('from_id') or 'unknown'}): {message['text']}")
 
 
+def _detect_hook_host(payload, session_id=None, host=None):
+    if host is not None:
+        return profiles.normalize_host(host)
+    transcript = payload.get("transcript_path") or payload.get("transcriptPath")
+    for candidate, root, variable in (("codex", codex_home(), "CODEX_THREAD_ID"),
+                                       ("claude", claude_home(), "CLAUDE_CODE_SESSION_ID"),
+                                       ("agy", agy_home(), "ANTIGRAVITY_CONVERSATION_ID")):
+        if ((session_id and session_id == os.environ.get(variable)) or
+                (transcript and inside(resolved(transcript), resolved(root)))):
+            return candidate
+    if any(k in payload for k in ("conversationId", "hookEventName", "workspacePaths")):
+        return "agy"
+    return None
+
+
+def _hook_cwd(payload):
+    if payload.get("cwd"):
+        return payload["cwd"]
+    ws = payload.get("workspacePaths")
+    if isinstance(ws, list) and ws and isinstance(ws[0], str) and ws[0]:
+        return ws[0]
+    return os.getcwd()
+
+
 def hook(payload, minutes=ACTIVE_MINUTES, host=None):
-    """Context for a Claude Code or Codex hook: new messages, then sessions sharing this worktree."""
-    session_id = payload.get("session_id") or payload.get("thread_id")
+    """Context for a Codex, Claude Code, or Antigravity hook: messages and worktree peers."""
+    session_id = (payload.get("session_id") or payload.get("thread_id")
+                  or payload.get("conversationId"))
+    host = _detect_hook_host(payload, session_id, host)
     if not session_id:
         if os.environ.get('AGENT_SESSIONS_PROFILE_ID') is not None:
             raise profiles.ProfileError('profiled hook requires a native session id')
-        return None
-    event = payload.get("hook_event_name") or "UserPromptSubmit"
+        return {} if host == "agy" else None
+    event = payload.get("hook_event_name") or payload.get("hookEventName") or "UserPromptSubmit"
     if event not in HOOK_EVENTS:
-        return None
+        return {} if host == "agy" else None
     if (event == "SessionStart" and not payload.get("agent_id")
             and payload.get("source") not in ("resume", "compact")):
         record_start(session_id)
-    cwd = payload.get("cwd") or os.getcwd()
-    if host is None:
-        transcript = payload.get("transcript_path")
-        for candidate, root, variable in (("codex", codex_home(), "CODEX_THREAD_ID"),
-                                           ("claude", claude_home(), "CLAUDE_CODE_SESSION_ID")):
-            if (session_id == os.environ.get(variable) or
-                    (transcript and inside(resolved(transcript), resolved(root)))):
-                host = candidate
-                break
+    cwd = _hook_cwd(payload)
     validate_session_id(session_id)
     expected = None
     marker = os.environ.get('AGENT_SESSIONS_PROFILE_ID')
-    if marker is None and profiles.binding(data_dir(),session_id) is None:
+    if marker is None and profiles.binding(data_dir(), session_id) is None:
         bound = {pair['profile'] for pair in all_pairs() if pair.get('profile')
                  and pair['partner']['id'] == session_id}
         if len(bound) > 1:
             raise profiles.ProfileError('session has conflicting partner profiles')
-        expected = next(iter(bound),None)
+        expected = next(iter(bound), None)
     profiles.guard(data_dir(), session_id, cwd, host,
                    marker, write_json, expected)
-    # Claude subagents share the session id; guard the profile but leave messages
+    # Subagents share the session id; guard the profile but leave messages
     # and start tracking for the main thread.
-    if event == 'PreToolUse' or payload.get('agent_id'):
+    if host == "agy":
+        if event == "PreToolUse":
+            return {"decision": "allow"}
+        if event == "PostToolUse" or payload.get("agent_id"):
+            return {}
+    elif event == 'PreToolUse' or payload.get('agent_id'):
         return None
     received = receive(session_id, cwd, host=host)
     lines = [describe_message(m) for m in received]
@@ -992,7 +1269,7 @@ def hook(payload, minutes=ACTIVE_MINUTES, host=None):
         lines.append(f"Claim a message before acting on it: python3 {Path(__file__).resolve()} "
                      "claim <id> ['ready']. Claiming removes it from the queue and replies to "
                      "the sender.")
-    if event in ("SessionStart", "UserPromptSubmit"):
+    if event in ("SessionStart", "UserPromptSubmit", "PreInvocation"):
         here = git_state(cwd)
         if here.get("root"):
             with locked(state_path(session_id)):
@@ -1008,6 +1285,10 @@ def hook(payload, minutes=ACTIVE_MINUTES, host=None):
                 lines += [f"- {describe(s)}" for s in peers]
                 lines.append(f"Coordinate before editing: python3 {Path(__file__).resolve()} "
                              "send <id> '<message>'.")
+    if host == "agy":
+        if not lines:
+            return {}
+        return {"injectSteps": [{"systemMessage": {"systemMessage": "\n".join(lines)}}]}
     if not lines:
         return None
     return {"hookSpecificOutput": {"hookEventName": event, "additionalContext": "\n".join(lines)}}
@@ -1026,6 +1307,38 @@ def has_profile_context(session_id=None):
 
 def configure_hooks(host, dry_run=False, remove=False):
     """Merge only this executable's hooks, preserving other handlers and host settings."""
+    host = profiles.normalize_host(host)
+    if host == "agy":
+        path = (agy_config_dir() / "hooks.json").resolve()
+        command = shlex.join([sys.executable, str(Path(__file__).resolve()),
+                              "hook", "--host", "agy"])
+
+        def merged_agy():
+            try:
+                config = json.loads(path.read_text(encoding="utf-8"))
+            except FileNotFoundError:
+                config = {}
+            if not isinstance(config, dict):
+                raise TypeError(f"invalid hook configuration: {path}")
+            if remove:
+                config.pop("agent-sessions", None)
+            else:
+                handler = {"type": "command", "command": command, "timeout": 10}
+                config["agent-sessions"] = {
+                    "SessionStart": [dict(handler)],
+                    "PreInvocation": [dict(handler)],
+                    "PreToolUse": [{"matcher": "*", "hooks": [dict(handler)]}],
+                    "PostToolUse": [{"matcher": "*", "hooks": [dict(handler)]}],
+                }
+            return config
+
+        if dry_run:
+            return path, merged_agy()
+        with locked(path):
+            config = merged_agy()
+            write_json(path, config)
+        return path, config
+
     path = ((codex_home() / "hooks.json") if host == "codex" else
             (claude_home() / "settings.json")).resolve()
     legacy = shlex.join([sys.executable, str(Path(__file__).resolve()), "hook"])
@@ -1045,7 +1358,7 @@ def configure_hooks(host, dry_run=False, remove=False):
                     or any(not isinstance(handler, dict) for handler in group["hooks"])
                     for group in groups):
                 raise ValueError(f"invalid hook configuration: {path}")
-        for event in HOOK_EVENTS:
+        for event in NATIVE_HOOK_EVENTS:
             groups = hooks.get(event, [])
             remaining = []
             for group in groups:
@@ -1124,19 +1437,20 @@ def _main(argv=None):
     claiming.add_argument("--session", help="claiming session id (default: this session)")
     checking = sub.add_parser("status", help="whether a message is pending, received or claimed")
     checking.add_argument("message_id")
-    hooking = sub.add_parser("hook", help="read a Claude Code or Codex hook payload on stdin")
-    hooking.add_argument("--host", choices=("codex", "claude"), help="receiving host")
+    hooking = sub.add_parser("hook", help="read a Codex, Claude Code, or Antigravity hook payload")
+    hooking.add_argument("--host", choices=HOST_CHOICES, help="receiving host")
     configuring = sub.add_parser("configure", help="install or remove hooks, preserving settings")
-    configuring.add_argument("host", choices=("codex", "claude"))
+    configuring.add_argument("host", choices=HOST_CHOICES)
     configuring.add_argument("--dry-run", action="store_true", help="print settings without writing")
     configuring.add_argument("--remove", action="store_true", help="remove this installation's hooks")
     profiling = sub.add_parser('profile', help='pin and launch native partner configuration')
     profile_actions = profiling.add_subparsers(dest='profile_action', required=True)
     creating_profile = profile_actions.add_parser('create')
-    creating_profile.add_argument('host', choices=('codex','claude'))
+    creating_profile.add_argument('host', choices=HOST_CHOICES)
     creating_profile.add_argument('path')
     creating_profile.add_argument('name')
-    creating_profile.add_argument('--file', action='append', default=[], help='additional relative file to pin')
+    creating_profile.add_argument('--file', action='append', default=[],
+                                  help='additional relative file to pin')
     showing_profile = profile_actions.add_parser('show')
     showing_profile.add_argument('profile_id')
     launching_profile = profile_actions.add_parser('launch')
@@ -1144,10 +1458,18 @@ def _main(argv=None):
     launching_profile.add_argument('--resume', help='existing session bound to this profile')
     launching_profile.add_argument('--pair', help='pending profile partner id')
     launching_profile.add_argument('--dry-run', action='store_true')
+    launching_profile.add_argument('-p', '--print', dest='print_prompt',
+                                   help='single prompt for headless execution (agy)')
+    launching_profile.add_argument('--headless', action='store_true',
+                                   help='run in non-interactive headless mode (agy)')
+    launching_profile.add_argument('--output-format', choices=('text', 'json', 'stream-json'),
+                                   help='output format for headless mode (agy)')
     partnering = sub.add_parser("partner", help="invite or connect a partner session")
     actions = partnering.add_subparsers(dest="partner_action", required=True)
-    for host in ("codex", "claude"):
-        creating = actions.add_parser(host, help=f"prepare a {host} partner in a directory")
+    for host in HOSTS:
+        aliases = ("antigravity",) if host == "agy" else ()
+        creating = actions.add_parser(host, aliases=aliases,
+                                      help=f"prepare a {host} partner in a directory")
         creating.add_argument("path")
         creating.add_argument("brief")
         creating.add_argument("--session", help="caller session id (default: this session)")
@@ -1170,6 +1492,12 @@ def _main(argv=None):
     resuming.add_argument('pair_id')
     resuming.add_argument('--session', help='caller session id (default: this session)')
     resuming.add_argument('--dry-run', action='store_true')
+    resuming.add_argument('-p', '--print', dest='print_prompt',
+                          help='single prompt for headless execution (agy)')
+    resuming.add_argument('--headless', action='store_true',
+                          help='run in non-interactive headless mode (agy)')
+    resuming.add_argument('--output-format', choices=('text', 'json', 'stream-json'),
+                          help='output format for headless mode (agy)')
     running = actions.add_parser('run', help='run one Codex partner turn without command hooks')
     running.add_argument('pair_id')
     running.add_argument('--timeout', type=float, default=60)
@@ -1203,7 +1531,10 @@ def _main(argv=None):
         elif args.profile_action == 'show':
             result = profiles.load(data_dir(), args.profile_id)
         else:
-            result = launch_profile(args.profile_id, args.resume, args.pair, args.dry_run)
+            headless = args.headless or args.print_prompt is not None
+            result = launch_profile(args.profile_id, args.resume, args.pair, args.dry_run,
+                                    prompt=args.print_prompt, headless=headless,
+                                    output_format=args.output_format)
         print(json.dumps(result, indent=2))
         return 0
 
@@ -1245,23 +1576,54 @@ def _main(argv=None):
         return 0
 
     if args.command == "hook":
-        profiled = has_profile_context(environment_session_id())
+        env_sid = environment_session_id()
+        effective_host = _detect_hook_host(
+            {}, env_sid, profiles.normalize_host(args.host) if args.host else None
+        )
+        event = ""
+        profiled = has_profile_context(env_sid)
+
+        def _agy_block(msg):
+            if event == "PreToolUse":
+                print(json.dumps({"decision": "deny", "reason": msg}))
+            else:
+                print(json.dumps({
+                    "injectSteps": [{"errorMessage": {"userMessage": msg}}],
+                    "terminationBehavior": "terminate",
+                }))
+
         try:
             raw = sys.stdin.read()
             payload = json.loads(raw) if raw.strip() else {}
-            if not isinstance(payload,dict):
+            if not isinstance(payload, dict):
                 raise TypeError('hook payload must be a JSON object')
-            profiled = profiled or has_profile_context(payload.get('session_id') or payload.get('thread_id'))
-            if profiled and not (payload.get('session_id') or payload.get('thread_id')):
+            sid = (payload.get('session_id') or payload.get('thread_id')
+                   or payload.get('conversationId'))
+            event = payload.get('hook_event_name') or payload.get('hookEventName') or ''
+            effective_host = _detect_hook_host(payload, sid, effective_host)
+            profiled = profiled or has_profile_context(sid)
+            if profiled and not sid:
                 raise profiles.ProfileError('profiled hook requires a native session id')
-            result = hook(payload, args.minutes, args.host)
+            result = hook(payload, args.minutes, effective_host)
         except profiles.ProfileError as exc:
-            print(f'agent-sessions profile: {exc}', file=sys.stderr)
+            msg = f'agent-sessions profile: {exc}'
+            print(msg, file=sys.stderr)
+            if effective_host == "agy":
+                _agy_block(msg)
+                return 0
             return 2
         except Exception as exc:  # noqa: BLE001 - ordinary message hooks remain non-blocking
-            print(f"agent-sessions hook: {exc}", file=sys.stderr)
-            return 2 if profiled else 0
-        if result:
+            msg = f"agent-sessions hook: {exc}"
+            print(msg, file=sys.stderr)
+            if profiled:
+                if effective_host == "agy":
+                    _agy_block(msg)
+                    return 0
+                return 2
+            if effective_host == "agy":
+                print(json.dumps({"decision": "allow"} if event == "PreToolUse" else {}))
+            return 0
+        if result is not None:
             print(json.dumps(result))
         return 0
 
@@ -1276,11 +1638,14 @@ def _main(argv=None):
                                      args.host_id)
         elif args.partner_action == 'resume':
             pair = read_pair(args.pair_id)
-            if caller not in (pair['caller']['id'],pair['partner']['id']):
+            if caller not in (pair['caller']['id'], pair['partner']['id']):
                 raise ValueError('only a pair endpoint can resume the partner')
             if not pair.get('profile') or pair['status'] != 'connected':
                 raise ValueError('resume requires a connected profiled partner')
-            result = launch_profile(pair['profile'],pair['partner']['id'],pair['id'],args.dry_run)
+            headless = args.headless or args.print_prompt is not None
+            result = launch_profile(pair['profile'], pair['partner']['id'], pair['id'],
+                                    args.dry_run, prompt=args.print_prompt,
+                                    headless=headless, output_format=args.output_format)
         else:
             result = create_partner(args.partner_action, args.path, args.brief, caller, found,
                                     getattr(args, "project_id", None), args.profile)

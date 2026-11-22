@@ -37,11 +37,18 @@ class Machine(unittest.TestCase):
         (self.repo / "a.txt").write_text("two\n")
         self.codex = self.root / "codex"
         self.claude = self.root / "claude"
+        self.agy = self.root / "agy"
+        self.agy_config = self.root / "agy-config"
         self.data = self.root / "data"
         self.env = {**os.environ, "CODEX_HOME": str(self.codex),
-                    "CLAUDE_CONFIG_DIR": str(self.claude), "AGENT_SESSIONS_DATA": str(self.data)}
-        self.env.pop("CLAUDE_CODE_SESSION_ID", None)
-        self.env.pop("CODEX_THREAD_ID", None)
+                    "CLAUDE_CONFIG_DIR": str(self.claude),
+                    "AGY_HOME": str(self.agy),
+                    "AGY_CONFIG_DIR": str(self.agy_config),
+                    "AGENT_SESSIONS_DATA": str(self.data)}
+        for var in ("CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID", "CLAUDE_PID",
+                    "ANTIGRAVITY_CONVERSATION_ID", "ANTIGRAVITY_AGENT",
+                    "ANTIGRAVITY_APP_DATA_DIR"):
+            self.env.pop(var, None)
         self.now = time.time()
         self.rows = []
         self.codex.mkdir()
@@ -550,6 +557,231 @@ class HookSetupTests(Machine):
                                         check=False)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertEqual(path.read_text(), content)
+
+
+class AgyHostTests(Machine):
+    def _write_agy_db(self, rows):
+        self.agy.mkdir(parents=True, exist_ok=True)
+        db = sqlite3.connect(self.agy / "conversation_summaries.db")
+        db.execute(
+            "create table conversation_summaries ("
+            "conversation_id text primary key, title text, preview text, "
+            "last_modified_time text, workspace_uris text, status text, "
+            "parent_conversation_id text, agent_name text, not_fully_idle int, killed int)"
+        )
+        for row in rows:
+            db.execute(
+                "insert into conversation_summaries values (?,?,?,?,?,?,?,?,?,?)",
+                row,
+            )
+        db.commit()
+        db.close()
+
+    def test_discovers_agy_sessions_and_edited_files(self):
+        now_iso = time.strftime("%Y-%m-%d %H:%M:%S+00:00", time.gmtime(self.now))
+        old_iso = time.strftime("%Y-%m-%d %H:%M:%S+00:00", time.gmtime(self.now - 7 * 86400))
+        self._write_agy_db([
+            ("agy-main-0001", "Audit repo", "preview", now_iso,
+             json.dumps([f"file://{self.repo}"]), "CASCADE_RUN_STATUS_RUNNING",
+             "", "auditor", 0, 0),
+            ("agy-sub-0002", "", "Subagent task", str(self.now),
+             json.dumps([f"file://{self.worktree}"]), "CASCADE_RUN_STATUS_IDLE",
+             "agy-main-0001", "worker", 0, 0),
+            ("agy-killed-0003", "Dead", "", now_iso,
+             json.dumps([f"file://{self.repo}"]), "CASCADE_RUN_STATUS_IDLE",
+             "", "", 0, 1),
+            ("agy-old-0004", "Old", "", old_iso,
+             json.dumps([f"file://{self.repo}"]), "CASCADE_RUN_STATUS_IDLE",
+             "", "", 0, 0),
+        ])
+        tdir = self.agy / "brain" / "agy-main-0001" / ".system_generated" / "logs"
+        tdir.mkdir(parents=True)
+        (tdir / "transcript.jsonl").write_text(json.dumps({
+            "tool_calls": [
+                {"name": "write_to_file", "args": {"TargetFile": str(self.repo / "a.txt")}}
+            ]
+        }) + "\n")
+        conv_dir = self.agy / "conversations"
+        conv_dir.mkdir(parents=True)
+        cdb = sqlite3.connect(conv_dir / "agy-sub-0002.db")
+        cdb.execute("create table steps (idx int primary key, step_type int, step_payload blob)")
+        payload = (b'\x08\x84\x01replace_file_content'
+                   + json.dumps({"TargetFile": str(self.worktree / "a.txt")}).encode())
+        cdb.execute("insert into steps values (1, 132, ?)", (payload,))
+        cdb.commit()
+        cdb.close()
+
+        found = {s["id"]: s for s in json.loads(self.run_tool("--json", "list"))}
+        self.assertIn("agy-main-0001", found)
+        self.assertIn("agy-sub-0002", found)
+        self.assertNotIn("agy-killed-0003", found)
+        self.assertNotIn("agy-old-0004", found)
+        main = found["agy-main-0001"]
+        sub = found["agy-sub-0002"]
+        self.assertEqual((main["host"], main["status"], main["title"], main["edited"]),
+                         ("agy", "running", "Audit repo", [str(self.repo / "a.txt")]))
+        self.assertEqual((sub["host"], sub["status"], sub["parent"], sub["role"], sub["edited"]),
+                         ("agy", "idle", "agy-main-0001", "subagent",
+                          [str(self.worktree / "a.txt")]))
+        peers = {s["id"]: s["overlap"]
+                 for s in json.loads(self.run_tool("--json", "who", str(self.repo)))["sessions"]}
+        self.assertEqual(peers["agy-main-0001"], ["a.txt"])
+        self.assertEqual(peers["agy-sub-0002"], ["a.txt"])
+
+    def test_configure_agy_hooks_preserves_other_groups_and_removes_cleanly(self):
+        self.agy_config.mkdir(parents=True)
+        hooks_file = self.agy_config / "hooks.json"
+        existing = {
+            "secure-agent": {
+                "PreToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": "true"}]}]
+            }
+        }
+        hooks_file.write_text(json.dumps(existing))
+        preview = json.loads(self.run_tool("configure", "antigravity", "--dry-run"))
+        self.assertIn("secure-agent", preview)
+        self.assertIn("agent-sessions", preview)
+        self.assertEqual(json.loads(hooks_file.read_text()), existing)
+
+        self.run_tool("configure", "agy")
+        installed = json.loads(hooks_file.read_text())
+        self.assertEqual(installed["secure-agent"], existing["secure-agent"])
+        group = installed["agent-sessions"]
+        self.assertIsInstance(group["SessionStart"], list)
+        self.assertEqual(group["SessionStart"][0]["type"], "command")
+        self.assertEqual(group["PreInvocation"][0]["type"], "command")
+        self.assertEqual(group["PreToolUse"][0]["matcher"], "*")
+        self.assertEqual(group["PostToolUse"][0]["matcher"], "*")
+
+        self.run_tool("configure", "agy", "--remove")
+        self.assertEqual(json.loads(hooks_file.read_text()), existing)
+
+    def test_agy_hook_events_and_message_delivery(self):
+        self._write_agy_db([
+            ("agy-worker-0001", "Worker", "", str(self.now),
+             json.dumps([f"file://{self.worktree}"]), "CASCADE_RUN_STATUS_IDLE",
+             "", "", 0, 0),
+        ])
+        self.run_tool("send", "agy-worker-0001", "check security", "--session", "codex-main-0001")
+        pre_tool = json.loads(self.run_tool(
+            "hook", "--host", "agy",
+            stdin=json.dumps({
+                "conversationId": "agy-worker-0001",
+                "hookEventName": "PreToolUse",
+                "workspacePaths": [str(self.worktree)],
+            }),
+        ))
+        self.assertEqual(pre_tool, {"decision": "allow"})
+        post_tool = json.loads(self.run_tool(
+            "hook", "--host", "agy",
+            stdin=json.dumps({
+                "conversationId": "agy-worker-0001",
+                "hookEventName": "PostToolUse",
+                "workspacePaths": [str(self.worktree)],
+            }),
+        ))
+        self.assertEqual(post_tool, {})
+        subagent = json.loads(self.run_tool(
+            "hook", "--host", "agy",
+            stdin=json.dumps({
+                "conversationId": "agy-worker-0001",
+                "hookEventName": "PreInvocation",
+                "workspacePaths": [str(self.worktree)],
+                "agent_id": "sub-1",
+            }),
+        ))
+        self.assertEqual(subagent, {})
+        delivered = json.loads(self.run_tool(
+            "hook", "--host", "agy",
+            stdin=json.dumps({
+                "conversationId": "agy-worker-0001",
+                "hookEventName": "PreInvocation",
+                "workspacePaths": [str(self.worktree)],
+            }),
+        ))
+        msg = delivered["injectSteps"][0]["systemMessage"]["systemMessage"]
+        self.assertIn("check security", msg)
+        empty = json.loads(self.run_tool(
+            "hook", "--host", "agy",
+            stdin=json.dumps({
+                "conversationId": "agy-worker-0001",
+                "hookEventName": "PreInvocation",
+                "workspacePaths": [str(self.worktree)],
+            }),
+        ))
+        self.assertEqual(empty, {})
+
+    def test_agy_partner_invitation_and_connect(self):
+        pair = json.loads(self.run_tool("partner", "antigravity", str(self.worktree),
+                                        "Audit worktree", "--session", "codex-main-0001"))
+        self.assertEqual(pair["partner"]["host"], "agy")
+        self.assertEqual(pair["status"], "waiting")
+        self._write_agy_db([
+            ("agy-new-0009", "Partner", "", str(self.now),
+             json.dumps([f"file://{self.worktree}"]), "CASCADE_RUN_STATUS_IDLE",
+             "", "", 0, 0),
+        ])
+        started = json.loads(self.run_tool(
+            "hook", "--host", "agy",
+            stdin=json.dumps({
+                "conversationId": "agy-new-0009",
+                "hookEventName": "SessionStart",
+                "workspacePaths": [str(self.worktree)],
+            }),
+        ))
+        self.assertIn(pair["id"], started["injectSteps"][0]["systemMessage"]["systemMessage"])
+        agy_env = {**self.env, "ANTIGRAVITY_CONVERSATION_ID": "agy-new-0009"}
+        connected = json.loads(self.run_tool("partner", "connect", pair["id"], env=agy_env))
+        self.assertEqual(connected["status"], "connected")
+        self.assertEqual(connected["partner"]["id"], "agy-new-0009")
+
+    def test_agy_environment_session_id_resolution(self):
+        self._write_agy_db([
+            ("agy-env-0010", "Env test", "", str(self.now),
+             json.dumps([f"file://{self.worktree}"]), "CASCADE_RUN_STATUS_IDLE",
+             "", "", 0, 0),
+        ])
+        self.run_tool("send", "agy-env-0010", "hello agy", "--session", "codex-main-0001")
+        # Hermetic fake ps exercising _nearer_host's base == 'agy' branch regardless of parent shell
+        fake_bin = self.root / "fake-ps-agy"
+        fake_bin.mkdir()
+        fake_ps = fake_bin / "ps"
+        fake_ps.write_text("#!/bin/sh\necho '1 agy'\n")
+        fake_ps.chmod(0o755)
+        env = {**self.env, "PATH": str(fake_bin) + os.pathsep + os.environ.get("PATH", ""),
+               "CODEX_THREAD_ID": "codex-main-0001",
+               "ANTIGRAVITY_CONVERSATION_ID": "agy-env-0010"}
+        inbox = json.loads(self.run_tool("--json", "inbox", "--keep", env=env))
+        self.assertEqual([m["text"] for m in inbox], ["hello agy"])
+
+        # Fallback to ANTIGRAVITY_AGENT=1 when ps reports no known host ancestor
+        fake_ps.write_text("#!/bin/sh\necho '1 zsh'\n")
+        env_fallback = {**env, "ANTIGRAVITY_AGENT": "1"}
+        inbox2 = json.loads(self.run_tool("--json", "inbox", env=env_fallback))
+        self.assertEqual([m["text"] for m in inbox2], ["hello agy"])
+
+    def test_agy_skips_invalid_conversation_ids_from_db(self):
+        self._write_agy_db([
+            ("../escape", "Bad row", "", str(self.now),
+             json.dumps([f"file://{self.worktree}"]), "CASCADE_RUN_STATUS_IDLE",
+             "", "", 0, 0),
+            ("agy-good-0011", "Good row", "", str(self.now),
+             json.dumps([f"file://{self.worktree}"]), "CASCADE_RUN_STATUS_IDLE",
+             "", "", 0, 0),
+        ])
+        listed = json.loads(self.run_tool("--json", "list"))
+        ids = [s["id"] for s in listed]
+        self.assertIn("agy-good-0011", ids)
+        self.assertNotIn("../escape", ids)
+
+    def test_agy_hook_malformed_json_with_env_fails_closed_exit_zero(self):
+        env = {**self.env, "ANTIGRAVITY_CONVERSATION_ID": "agy-badjson-0001",
+               "AGENT_SESSIONS_PROFILE_ID": "prof-test-0001"}
+        proc = subprocess.run([sys.executable, str(TOOL), "hook"], input="{not-json",
+                              env=env, capture_output=True, text=True, check=False)
+        self.assertEqual(proc.returncode, 0)
+        body = json.loads(proc.stdout)
+        self.assertEqual(body["terminationBehavior"], "terminate")
+        self.assertIn("agent-sessions hook:", proc.stderr)
 
 
 if __name__ == "__main__":

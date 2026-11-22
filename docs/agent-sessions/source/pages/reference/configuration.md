@@ -6,13 +6,17 @@
 | --- | --- | --- |
 | `CODEX_HOME` | `~/.codex` | Codex session database, rollouts and hook settings |
 | `CLAUDE_CONFIG_DIR` | `~/.claude` | Claude transcripts and hook settings |
+| `AGY_HOME` | `~/.gemini/antigravity-cli` (fallback `ANTIGRAVITY_APP_DATA_DIR`) | Antigravity CLI session database and conversation records |
+| `AGY_CONFIG_DIR` | `~/.gemini/config` | Antigravity hook configuration (`hooks.json`) |
 | `AGENT_SESSIONS_DATA` | `~/.local/share/agent-sessions` | Queues, receipts, claims, pairs, profiles and bindings |
 | `CODEX_THREAD_ID` | Supplied by Codex | Native caller identity |
 | `CLAUDE_CODE_SESSION_ID` | Supplied by Claude Code | Native caller identity |
 | `CLAUDE_PID` | Supplied by Claude Code | Resolve caller identity when native hosts are nested |
+| `ANTIGRAVITY_CONVERSATION_ID` | Supplied by Antigravity | Native caller identity |
+| `ANTIGRAVITY_AGENT` | Supplied by Antigravity | Resolve caller identity when native hosts are nested |
 | `AGENT_SESSIONS_PROFILE_ID` | Set by the guarded launcher | Identify the pinned launch configuration |
 
-Both hosts must use the same message directory. Keep it outside source control.
+All configured hosts must use the same message directory. Keep it outside source control.
 Use native caller variables as supplied by the host; do not manufacture an ID from
 a directory. Commands that accept `--session ID` allow an explicit selection.
 The profile marker is launcher metadata, not an account credential.
@@ -23,6 +27,7 @@ The profile marker is launcher metadata, not an account credential.
 | --- | --- |
 | Codex | `threads` in the highest-numbered `state_<n>.sqlite`, opened read-only, and the tail of each thread's rollout |
 | Claude Code | `$CLAUDE_CONFIG_DIR/projects/*/<session>.jsonl`, active by modification time |
+| Antigravity (`agy`) | `$AGY_HOME/conversation_summaries.db` (read-only), plus transcripts or `step_type 132` conversation records for edited paths |
 | Git | Current checkout, common Git directory, branch and uncommitted paths |
 
 Git discovery disables optional locks and filesystem-monitor hooks. Host database
@@ -33,8 +38,12 @@ hidden unless requested with `list --reviews`.
 ## Native hook files
 
 `configure codex` writes `$CODEX_HOME/hooks.json`. `configure claude` writes
-`$CLAUDE_CONFIG_DIR/settings.json`. It merges handlers for `SessionStart`,
-`UserPromptSubmit`, `PreToolUse` and `PostToolUse` and preserves unrelated settings.
+`$CLAUDE_CONFIG_DIR/settings.json`. `configure agy` writes
+`$AGY_CONFIG_DIR/hooks.json` (default `~/.gemini/config/hooks.json`) under the
+`agent-sessions` group. Codex and Claude merge handlers for `SessionStart`,
+`UserPromptSubmit`, `PreToolUse` and `PostToolUse`; Antigravity merges
+`SessionStart`, `PreInvocation`, `PreToolUse` and `PostToolUse`, preserving
+unrelated settings.
 
 Commands include absolute interpreter and module paths plus the receiving host.
 Changing the installation path can leave obsolete handlers; see

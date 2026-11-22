@@ -55,18 +55,36 @@ class ProfileTests(Machine):
         self.assertEqual(json.loads(self.run_tool('partner','attach','codex-sub-0002',
             '--session','codex-main-0001')),pair)
 
-    def profile(self, host='codex', directory=None):
+    def profile(self, host='codex', directory=None, name='reviewer',
+                settings=None, mcp=None, agent_md=None, agent_layout='file'):
         directory = directory or self.worktree
         if host == 'codex':
             config = directory / '.codex/config.toml'
             config.parent.mkdir(exist_ok=True)
             config.write_text('[features]\napps = false\nplugins = false\n')
+        elif host in ('agy', 'antigravity'):
+            config = directory / '.agents/settings.json'
+            config.parent.mkdir(parents=True, exist_ok=True)
+            config.write_text(
+                json.dumps(settings if settings is not None else {'disableSlashCommands': True})
+                + '\n'
+            )
+            (directory / '.agents/mcp_config.json').write_text(
+                json.dumps(mcp if mcp is not None else {'mcpServers': {}}) + '\n'
+            )
+            if agent_md is not None:
+                if agent_layout == 'dir':
+                    apath = directory / '.agents/agents' / name / 'agent.md'
+                else:
+                    apath = directory / '.agents/agents' / f'{name}.md'
+                apath.parent.mkdir(parents=True, exist_ok=True)
+                apath.write_text(agent_md)
         else:
             config = directory / '.claude/settings.local.json'
             config.parent.mkdir(exist_ok=True)
             config.write_text('{"enabledPlugins": {}}\n')
             (directory / '.mcp.json').write_text('{"mcpServers": {}}\n')
-        result = json.loads(self.run_tool('profile', 'create', host, str(directory), 'reviewer'))
+        result = json.loads(self.run_tool('profile', 'create', host, str(directory), name))
         return result, config
 
     def hook_for(self, profile, session='codex-sub-0002', host='codex', **changes):
@@ -347,3 +365,192 @@ config = [{name = "painter", enabled = false}]
         self.assertNotIn('--dangerously-skip-permissions',observed['argv'][-1])
         pending=json.loads(self.run_tool('partner','show',pair['id']))
         self.assertEqual(pending['status'],'profile_launch_pending')
+
+    def test_agy_profile_capture_normalization_and_custom_agent_pinning(self):
+        agent_md = '---\nname: auditor\ndescription: Read-only auditor\n---\nAudit files.\n'
+        profile, _ = self.profile('antigravity', name='auditor', agent_md=agent_md,
+                                  agent_layout='dir')
+        self.assertEqual(profile['host'], 'agy')
+        paths = [f['path'] for f in profile['files']]
+        self.assertEqual(paths, [
+            '.agents/agents/auditor/agent.md',
+            '.agents/mcp_config.json',
+            '.agents/settings.json',
+        ])
+        dry = json.loads(self.run_tool('profile', 'launch', profile['id'], '--dry-run',
+                                       '--print', 'Audit auth.py', '--output-format', 'json'))
+        self.assertEqual(dry['argv'], [
+            'agy', '--settings', str(self.worktree / '.agents/settings.json'),
+            '--agent', 'auditor', '--disable-slash-commands',
+            '--output-format', 'json', '--print=Audit auth.py',
+        ])
+        self.assertNotIn('--model', dry['argv'])
+        self.assertNotIn('--dangerously-skip-permissions', dry['argv'])
+
+        # Ambiguous agent definitions (both dir and file) must fail
+        (self.worktree / '.agents/agents/auditor.md').write_text(agent_md)
+        both = subprocess.run([sys.executable, str(TOOL), 'profile', 'create', 'agy',
+                               str(self.worktree), 'auditor'], env=self.env,
+                              capture_output=True, text=True, check=False)
+        self.assertNotEqual(both.returncode, 0)
+
+        # Invalid path under .agents/agents/ must fail
+        bad_agent = self.worktree / '.agents/agents/nested/extra/agent.md'
+        bad_agent.parent.mkdir(parents=True)
+        bad_agent.write_text(agent_md)
+        bad = subprocess.run([sys.executable, str(TOOL), 'profile', 'create', 'agy',
+                              str(self.worktree), 'other', '--file',
+                              '.agents/agents/nested/extra/agent.md'], env=self.env,
+                             capture_output=True, text=True, check=False)
+        self.assertNotEqual(bad.returncode, 0)
+
+    def test_agy_profile_validation_rejects_bad_settings_mcp_and_frontmatter(self):
+        sentinel = 'synthetic-redacted-marker-for-test'
+        bad_cases = [
+            ({'hooks': {'PreToolUse': sentinel}}, {'mcpServers': {}}, None),
+            ({'disableSlashCommands': sentinel}, {'mcpServers': {}}, None),
+            ({'disableSlashCommands': False}, {'mcpServers': {'bad': {'env': sentinel}}}, None),
+            ({'disableSlashCommands': False}, {'mcpServers': {}},
+             '---\nname: wrong\n---\nbody\n'),
+            ({'disableSlashCommands': False}, {'mcpServers': {}},
+             '---\nname: validator\nmainAgent: false\n---\nbody\n'),
+        ]
+        for idx, (settings, mcp, agent_md) in enumerate(bad_cases):
+            with self.subTest(case=idx):
+                d = self.root / f'agy-bad-{idx}'
+                d.mkdir()
+                profile, _ = self.profile('agy', directory=d, name='validator',
+                                          settings=settings, mcp=mcp, agent_md=agent_md)
+                res = subprocess.run([sys.executable, str(TOOL), 'profile', 'launch',
+                                      profile['id'], '--dry-run'], env=self.env,
+                                     capture_output=True, text=True, check=False)
+                self.assertNotEqual(res.returncode, 0)
+                self.assertEqual(res.stdout, '')
+                self.assertNotIn(sentinel, res.stderr)
+
+    def test_agy_headless_and_pair_bootstrap_constraints(self):
+        codex_profile, _ = self.profile('codex')
+        res = subprocess.run([sys.executable, str(TOOL), 'profile', 'launch',
+                              codex_profile['id'], '--dry-run', '--print', 'hi'],
+                             env=self.env, capture_output=True, text=True, check=False)
+        self.assertNotEqual(res.returncode, 0)
+
+        agy_profile, _ = self.profile('agy')
+        no_prompt = subprocess.run([sys.executable, str(TOOL), 'profile', 'launch',
+                                    agy_profile['id'], '--dry-run', '--headless'],
+                                   env=self.env, capture_output=True, text=True, check=False)
+        self.assertNotEqual(no_prompt.returncode, 0)
+
+        pair = json.loads(self.run_tool('partner', 'agy', str(self.worktree), 'Work',
+                                        '--profile', agy_profile['id'],
+                                        '--session', 'codex-main-0001'))
+        combo = subprocess.run([sys.executable, str(TOOL), 'profile', 'launch',
+                                agy_profile['id'], '--pair', pair['id'], '--print', 'hi',
+                                '--dry-run'], env=self.env, capture_output=True, text=True,
+                               check=False)
+        self.assertNotEqual(combo.returncode, 0)
+
+        interactive = json.loads(self.run_tool('profile', 'launch', agy_profile['id'],
+                                               '--pair', pair['id'], '--dry-run'))
+        self.assertTrue(interactive['argv'][-1].startswith('--prompt-interactive='))
+
+    def test_agy_profile_hook_fails_closed_with_exit_0_and_structured_block(self):
+        profile, config = self.profile('agy')
+        env = {**self.env, 'AGENT_SESSIONS_PROFILE_ID': profile['id']}
+        start_payload = json.dumps({
+            'conversationId': 'agy-bound-0001',
+            'hookEventName': 'SessionStart',
+            'workspacePaths': [profile['cwd']],
+        })
+        ok = subprocess.run([sys.executable, str(TOOL), 'hook', '--host', 'agy'],
+                            input=start_payload, env=env, capture_output=True,
+                            text=True, check=False)
+        self.assertEqual(ok.returncode, 0, ok.stderr)
+        ok_body = json.loads(ok.stdout)
+        self.assertNotIn('terminationBehavior', ok_body)
+
+        # Bare resume without marker on PreInvocation must emit terminate JSON and exit 0
+        bare_pre = subprocess.run([sys.executable, str(TOOL), 'hook', '--host', 'agy'],
+                                  input=json.dumps({
+                                      'conversationId': 'agy-bound-0001',
+                                      'hookEventName': 'PreInvocation',
+                                      'workspacePaths': [profile['cwd']],
+                                  }), env=self.env, capture_output=True, text=True, check=False)
+        self.assertEqual(bare_pre.returncode, 0)
+        body = json.loads(bare_pre.stdout)
+        self.assertEqual(body['terminationBehavior'], 'terminate')
+        self.assertIn('userMessage', body['injectSteps'][0]['errorMessage'])
+        self.assertIn('agent-sessions profile:', bare_pre.stderr)
+
+        # Config drift on PreToolUse must emit deny JSON and exit 0
+        config.write_text('{"disableSlashCommands": false}\n')
+        drift_tool = subprocess.run([sys.executable, str(TOOL), 'hook', '--host', 'agy'],
+                                    input=json.dumps({
+                                        'conversationId': 'agy-bound-0001',
+                                        'hookEventName': 'PreToolUse',
+                                        'workspacePaths': [profile['cwd']],
+                                    }), env=env, capture_output=True, text=True, check=False)
+        self.assertEqual(drift_tool.returncode, 0)
+        deny = json.loads(drift_tool.stdout)
+        self.assertEqual(deny['decision'], 'deny')
+        self.assertIn('agent-sessions profile:', deny['reason'])
+
+    def test_agy_real_launcher_strips_foreign_envs_and_supports_headless_resume(self):
+        profile, _ = self.profile('agy')
+        binary = self.root / 'agy-bin'
+        binary.mkdir()
+        fake = binary / 'agy'
+        fake.write_text(
+            '#!'+sys.executable+'\nimport json,os,sys\nfrom pathlib import Path\n'
+            'Path(os.environ["TEST_AGY_OUT"]).write_text(json.dumps({'
+            '"argv":sys.argv[1:],"cwd":os.getcwd(),'
+            '"profile":os.environ.get("AGENT_SESSIONS_PROFILE_ID"),'
+            '"stripped":[os.environ.get(k) for k in ('
+            '"CODEX_THREAD_ID","CLAUDE_CODE_SESSION_ID","CLAUDE_PID",'
+            '"ANTIGRAVITY_CONVERSATION_ID","ANTIGRAVITY_AGENT")]}))\n'
+        )
+        fake.chmod(0o700)
+        # Bind session first
+        bind_env = {**self.env, 'AGENT_SESSIONS_PROFILE_ID': profile['id']}
+        self.run_tool('hook', '--host', 'agy', env=bind_env, stdin=json.dumps({
+            'conversationId': 'agy-res-0001', 'hookEventName': 'SessionStart',
+            'workspacePaths': [profile['cwd']],
+        }))
+        out_path = self.root / 'agy-launch.json'
+        env = {
+            **self.env,
+            'PATH': str(binary) + os.pathsep + os.environ['PATH'],
+            'TEST_AGY_OUT': str(out_path),
+            'CODEX_THREAD_ID': 'c1',
+            'CLAUDE_CODE_SESSION_ID': 'cl1',
+            'CLAUDE_PID': '12345',
+            'ANTIGRAVITY_CONVERSATION_ID': 'a1',
+            'ANTIGRAVITY_AGENT': '1',
+        }
+        self.run_tool('profile', 'launch', profile['id'], '--resume', 'agy-res-0001',
+                      '--print', 'Follow up', '--output-format', 'stream-json', env=env)
+        observed = json.loads(out_path.read_text())
+        self.assertEqual(observed['cwd'], profile['cwd'])
+        self.assertEqual(observed['profile'], profile['id'])
+        self.assertEqual(observed['stripped'], [None, None, None, None, None])
+        self.assertIn('--conversation', observed['argv'])
+        self.assertIn('agy-res-0001', observed['argv'])
+        self.assertIn('--output-format', observed['argv'])
+        self.assertIn('stream-json', observed['argv'])
+        self.assertIn('--print=Follow up', observed['argv'])
+
+    def test_agy_frontmatter_strips_inline_yaml_comments(self):
+        worker = self.root / 'agy-comment-worker'
+        (worker / '.agents' / 'agents' / 'auditor').mkdir(parents=True)
+        (worker / '.agents' / 'settings.json').write_text('{}\n')
+        (worker / '.agents' / 'mcp_config.json').write_text('{"mcpServers": {}}\n')
+        (worker / '.agents' / 'agents' / 'auditor' / 'agent.md').write_text(
+            '---\nname: auditor # inline comment\nmainAgent: false # subagent\n---\nPrompt\n'
+        )
+        created = json.loads(self.run_tool('profile', 'create', 'agy', str(worker), 'auditor'))
+        proc = subprocess.run(
+            [sys.executable, str(TOOL), 'profile', 'launch', created['id'], '--dry-run'],
+            env=self.env, capture_output=True, text=True, check=False,
+        )
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn('mainAgent', proc.stderr)

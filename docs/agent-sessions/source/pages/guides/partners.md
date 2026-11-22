@@ -2,26 +2,29 @@
 
 A partner record connects a caller and another native session. Records preserve
 each endpoint's host, session ID and directory. `list` and `who` show the relationship
-from both ends. One caller can have several partners across both hosts.
+from both ends. One caller can have several partners across Codex, Claude Code,
+and Antigravity (`agy`).
 
 ## Choose a route
 
 | You want to… | Use |
 | --- | --- |
 | Invite a new Claude session under a directory | `partner claude` |
+| Invite a new Antigravity session under a directory | `partner agy` (`partner antigravity`) |
 | Create a Codex chat through the desktop app | `partner codex --project-id` |
 | Register a worker that already exists | `partner attach` |
 | Launch or resume with pinned configuration | [Worker profiles](profiles.md) |
 
-## Invite a Claude partner
+## Invite a Claude or Antigravity partner
 
 ```sh
 agent-sessions partner claude /path/to/project 'Review the parser'
+agent-sessions partner agy /path/to/project 'Review the parser'
 ```
 
 This saves a pair in `waiting` state and queues an invitation. It does not launch
-Claude. Start a new Claude session under that directory with the hooks installed.
-The invitation supplies this connection command:
+the host. Start a new Claude or Antigravity (`agy`) session under that directory
+with the hooks installed. The invitation supplies this connection command:
 
 ```sh
 agent-sessions partner connect PAIR_ID
@@ -115,8 +118,8 @@ do not supply the human authorization those operations require.
 | State | Meaning | Next action |
 | --- | --- | --- |
 | `needs_creation` | A Codex request is saved | Execute the native request, then connect its result |
-| `needs_delivery` | Queueing a Claude invitation did not complete | Inspect the saved invitation and storage error |
-| `waiting` | A Claude invitation is queued | Start an eligible Claude session and connect it |
+| `needs_delivery` | Queueing a Claude or Antigravity invitation did not complete | Inspect the saved invitation and storage error |
+| `waiting` | A Claude or Antigravity invitation is queued | Start an eligible session and connect it |
 | `needs_profile_launch` | A profiled partner is prepared | Run its guarded launch command once |
 | `profile_launch_pending` | A guarded launch was attempted | Inspect the native session before retrying |
 | `connected` | Both native endpoints are recorded | Send work or resume a bound profile |
