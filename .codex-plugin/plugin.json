@@ -1,6 +1,6 @@
 {
   "name": "agent-sessions",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Coordinate local agent sessions with scoped workers and queued handoffs.",
   "author": {
     "name": "CAVI AI"

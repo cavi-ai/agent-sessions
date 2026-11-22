@@ -26,6 +26,7 @@ from pathlib import Path
 
 import session_profiles as profiles
 
+VERSION = '0.3.0'
 ACTIVE_MINUTES = 30
 TAIL_BYTES = 2_000_000
 GIT_TIMEOUT = 5
@@ -376,7 +377,7 @@ def agy_edited(conversation_id):
         conv_db = home_dir / "conversations" / f"{conversation_id}.db"
         if conv_db.is_file():
             try:
-                with closing(sqlite3.connect(f"file:{conv_db}?mode=ro", uri=True, timeout=5)) as conn:
+                with closing(sqlite3.connect(conv_db.absolute().as_uri() + "?mode=ro", uri=True, timeout=5)) as conn:
                     cols = {row[1] for row in conn.execute("pragma table_info(steps)")}
                     col = "step_payload" if "step_payload" in cols else (
                         "payload" if "payload" in cols else None
@@ -407,7 +408,7 @@ def agy_sessions(since, within=None):
     if not db.is_file():
         return []
     try:
-        with closing(sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=5)) as conn:
+        with closing(sqlite3.connect(db.absolute().as_uri() + "?mode=ro", uri=True, timeout=5)) as conn:
             cols = {row[1] for row in conn.execute("pragma table_info(conversation_summaries)")}
             if not {"conversation_id", "last_modified_time", "workspace_uris"} <= cols:
                 return []
@@ -504,12 +505,16 @@ def git_state(cwd, cache=None):
     return state
 
 
-def sessions(minutes=ACTIVE_MINUTES, include_reviews=False, within=None):
+def sessions(minutes=ACTIVE_MINUTES, include_reviews=False, within=None, host=None):
     """Active sessions, newest first; within limits them to working directories under a path."""
     since = time.time() - minutes * 60
-    found = (codex_sessions(since, include_reviews, within)
-             + claude_sessions(since, within)
-             + agy_sessions(since, within))
+    found = []
+    if host in (None, "codex"):
+        found.extend(codex_sessions(since, include_reviews, within))
+    if host in (None, "claude"):
+        found.extend(claude_sessions(since, within))
+    if host in (None, "agy"):
+        found.extend(agy_sessions(since, within))
     cache = {}
     for session in found:
         session["git"] = git_state(session["cwd"], cache)
@@ -521,6 +526,17 @@ def sessions(minutes=ACTIVE_MINUTES, include_reviews=False, within=None):
                     session.setdefault("partners", []).append({
                         **peer, "pair_id": pair["id"], "status": pair["status"]})
     return sorted(found, key=lambda s: -s["updated"])
+
+
+def matches_session(session, query):
+    """Match a literal case-insensitive substring against session and checkout details."""
+    if query is None:
+        return True
+    git = session.get('git') or {}
+    fields = (session.get('id'), session.get('title'), session.get('cwd'),
+              git.get('root'), git.get('common'), git.get('branch'))
+    needle = query.casefold()
+    return any(isinstance(value, str) and needle in value.casefold() for value in fields)
 
 
 def relative_files(session):
@@ -563,7 +579,7 @@ def home(path):
     return "~" + text[len(user):] if inside(text, user) else text
 
 
-def describe(session):
+def describe(session, full_id=False):
     git = session.get("git") or {}
     if git.get("missing"):
         place = f"{home(session['cwd'])} (missing)"
@@ -576,7 +592,8 @@ def describe(session):
     mine = " (this session)" if session["id"] == environment_session_id() else ""
     partners = "".join(f"; partner {p['host']} {p['id'] or p['status']} in {home(p['cwd'])}"
                        for p in session.get("partners", []))
-    return (f"{session['host']} {session['id'][:13]}{mine} {session['status']} "
+    display_id = session["id"] if full_id else session["id"][:13]
+    return (f"{session['host']} {display_id}{mine} {session['status']} "
             f"{ago(session['updated'])} ago{parent}: {session['title'] or '(untitled)'} -- "
             f"{place}{partners}")
 
@@ -728,7 +745,7 @@ def read_pair(pair_id):
     pair = json.loads(pair_path(pair_id).read_text(encoding="utf-8"))
     if (not isinstance(pair, dict) or pair.get("id") != pair_id or
             pair.get("status") not in ("needs_creation", "needs_delivery", "waiting", "connected",
-                                       "needs_profile_launch", "profile_launch_pending")):
+                                       "needs_profile_launch", "profile_launch_pending", "completed")):
         raise ValueError(f"invalid pair record: {pair_id}")
     for key in ("caller", "partner"):
         end = pair.get(key)
@@ -736,10 +753,23 @@ def read_pair(pair_id):
                 end.get("host") not in HOSTS or
                 not isinstance(end.get("cwd"), str) or not Path(end["cwd"]).is_absolute()):
             raise ValueError(f"invalid pair endpoint: {pair_id}")
-        if key == "caller" or pair["status"] == "connected" or end.get("id") is not None:
+        if key == "caller" or pair["status"] in ("connected", "completed") or end.get("id") is not None:
             validate_session_id(end.get("id"))
     if pair.get('profile') is not None:
         profiles.identifier(pair['profile'])
+    if pair['status'] == 'completed':
+        completion = pair.get('completion')
+        if (not isinstance(completion, dict) or set(completion) != {'at', 'by', 'native_state'}
+                or not isinstance(completion['at'], str)
+                or completion['by'] not in (None, pair['caller']['id'], pair['partner']['id'])
+                or completion['native_state'] not in ('closed', 'archived', 'archive_failed', 'retained', 'stopped')):
+            raise ValueError('invalid pair completion record')
+        try:
+            stamp = datetime.fromisoformat(completion['at'])
+            if stamp.utcoffset() is None:
+                raise ValueError('missing timezone')
+        except ValueError as error:
+            raise ValueError('invalid pair completion time') from error
     return pair
 
 
@@ -751,6 +781,97 @@ def all_pairs():
         except (OSError, ValueError, TypeError) as exc:
             print(f"agent-sessions: skipping unreadable pair {path.stem}: {exc}", file=sys.stderr)
     return pairs
+
+
+def completed_workers(pairs):
+    """Worker identities whose completed pairs have no remaining open pair."""
+    closed = {(p['partner']['host'], p['partner']['id']) for p in pairs if p['status'] == 'completed'}
+    opened = {(endpoint['host'], endpoint['id']) for p in pairs if p['status'] != 'completed'
+              for endpoint in (p['caller'], p['partner'])}
+    return closed - opened
+
+
+def record_pair_completion(pair, completed_by, native_state):
+    """Record a terminal pair state while the caller holds its lock."""
+    if pair.get('status') != 'connected':
+        raise ValueError('completion requires a connected pair')
+    if completed_by not in (None, pair['caller']['id'], pair['partner']['id']):
+        raise ValueError('only a pair endpoint can complete the partner')
+    if native_state not in ('closed', 'archived', 'archive_failed', 'retained', 'stopped'):
+        raise ValueError('invalid native completion state')
+    pair['completion'] = {'at': datetime.now(timezone.utc).isoformat(), 'by': completed_by,
+                          'native_state': native_state}
+    pair['status'] = 'completed'
+
+
+def worker_has_open_references(pair):
+    identity = (pair['partner']['host'], pair['partner']['id'])
+    return any(other['id'] != pair['id'] and other['status'] != 'completed'
+               and any((end['host'], end['id']) == identity for end in (other['caller'], other['partner']))
+               for other in all_pairs())
+
+
+def _stop_claude_background(pair):
+    partner = pair['partner']
+    if partner['host'] != 'claude':
+        raise ValueError('--stop requires a Claude background partner')
+    try:
+        session_id = str(uuid.UUID(partner['id']))
+    except (ValueError, AttributeError):
+        raise ValueError('Claude background partner requires a full session UUID') from None
+    if session_id != partner['id']:
+        raise ValueError('Claude background partner requires a canonical session UUID')
+    environment = {key: os.environ[key] for key in ('HOME', 'PATH', 'CLAUDE_CONFIG_DIR') if key in os.environ}
+    try:
+        result = subprocess.run(['claude', 'agents', '--json', '--all'], env=environment,
+                                stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10, check=False)
+        if result.returncode != 0 or len(result.stdout) > 1_000_000:
+            raise ValueError('Claude background inventory is unavailable')
+        rows = json.loads(result.stdout)
+        if not isinstance(rows, list):
+            raise TypeError('Claude background inventory is invalid')
+        matches = [row for row in rows if isinstance(row, dict) and row.get('kind') == 'background'
+                   and row.get('sessionId') == session_id and isinstance(row.get('cwd'), str)
+                   and resolved(row['cwd']) == partner['cwd']]
+        if len(matches) != 1 or matches[0].get('state') != 'done':
+            raise ValueError('Claude background session is not confirmed done')
+        job_id = matches[0].get('id')
+        if (not isinstance(job_id, str) or not re.fullmatch(r'[A-Za-z0-9]{8}', job_id)
+                or sum(isinstance(row, dict) and row.get('id') == job_id for row in rows) != 1):
+            raise ValueError('Claude background job identity is ambiguous')
+        stopped = subprocess.run(['claude', 'stop', job_id], env=environment, stdin=subprocess.DEVNULL,
+                                 capture_output=True, text=True, timeout=10, check=False)
+        if stopped.returncode != 0:
+            raise ValueError('Claude background stop failed')
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as error:
+        raise ValueError('Claude background status or stop is unavailable') from error
+
+
+def complete_partner(pair_id, completed_by=None, stop=False):
+    if completed_by is not None:
+        validate_session_id(completed_by)
+    with locked(pair_path(pair_id), blocking=False):
+        pair = read_pair(pair_id)
+        if completed_by not in (None, pair['caller']['id'], pair['partner']['id']):
+            raise ValueError('only a pair endpoint can complete the partner')
+        if stop and pair['partner']['host'] != 'claude':
+            raise ValueError('--stop requires a Claude background partner')
+        if pair['status'] == 'completed':
+            if stop and pair['completion']['native_state'] != 'stopped':
+                raise ValueError('pair is already completed without a confirmed stop')
+            return pair
+        if pair['status'] != 'connected':
+            raise ValueError('completion requires a connected pair')
+        last_run = pair.get('last_run')
+        if last_run is not None and (not isinstance(last_run, dict) or last_run.get('status') != 'completed'):
+            raise ValueError('managed run must complete before the pair can be completed')
+        if stop:
+            if worker_has_open_references(pair):
+                raise ValueError('Claude worker is still used by another open pair')
+            _stop_claude_background(pair)
+        record_pair_completion(pair, completed_by, 'stopped' if stop else 'retained')
+        write_json(pair_path(pair_id), pair)
+        return pair
 
 
 def create_partner(host, directory, brief, caller_id, found, project_id=None, profile_id=None):
@@ -853,6 +974,8 @@ def launch_profile(profile_id, session_id=None, pair_id=None, dry_run=False,
     profile = profiles.load(data_dir(), profile_id)
     if session_id:
         validate_session_id(session_id)
+        if (profile['host'], session_id) in completed_workers(all_pairs()):
+            raise profiles.ProfileError('completed worker requires a new active pair before resume')
         receipt = profiles.binding(data_dir(), session_id)
         if not receipt or receipt['profile'] != profile_id:
             raise profiles.ProfileError('session is not bound to this profile')
@@ -860,6 +983,8 @@ def launch_profile(profile_id, session_id=None, pair_id=None, dry_run=False,
         pair = read_pair(pair_id)
         if pair.get('profile') != profile_id:
             raise profiles.ProfileError('pair uses a different profile')
+        if pair['status'] == 'completed':
+            raise profiles.ProfileError('completed pair cannot be resumed')
         if not session_id:
             if headless or prompt is not None or output_format is not None:
                 raise profiles.ProfileError(
@@ -876,20 +1001,40 @@ def launch_profile(profile_id, session_id=None, pair_id=None, dry_run=False,
     if dry_run:
         return {'profile': profile_id, 'host': profile['host'], 'cwd': profile['cwd'],
                 'argv': command, 'environment': marker}
-    if pair_id and not session_id:
-        with locked(pair_path(pair_id)):
-            pair = read_pair(pair_id)
-            if pair['status'] != 'needs_profile_launch':
-                raise profiles.ProfileError(
-                    'partner launch already attempted; inspect before retrying'
-                )
-            pair['status'] = 'profile_launch_pending'
-            write_json(pair_path(pair_id), pair)
     env = {**os.environ, **marker}
     for var in FOREIGN_SESSION_ENVS:
         env.pop(var, None)
-    os.chdir(profile['cwd'])
-    os.execvpe(command[0], command, env)
+
+    def attempt(original, pair=None):
+        try:
+            os.chdir(profile['cwd'])
+            os.execvpe(command[0], command, env)
+        except OSError:
+            try:
+                os.fchdir(original)
+            finally:
+                if pair is not None:
+                    pair['status'] = 'needs_profile_launch'
+                    write_json(pair_path(pair_id), pair)
+            raise
+
+    # Python creates non-inheritable descriptors, so successful exec releases the pair lock.
+    original = os.open('.', os.O_RDONLY)
+    try:
+        if pair_id and not session_id:
+            with locked(pair_path(pair_id)):
+                pair = read_pair(pair_id)
+                if pair['status'] != 'needs_profile_launch':
+                    raise profiles.ProfileError(
+                        'partner launch already attempted; inspect before retrying'
+                    )
+                pair['status'] = 'profile_launch_pending'
+                write_json(pair_path(pair_id), pair)
+                attempt(original, pair)
+        else:
+            attempt(original)
+    finally:
+        os.close(original)
 
 
 def connect_partner(pair_id, session_id, caller_id, found, host_id=None):
@@ -903,6 +1048,8 @@ def connect_partner(pair_id, session_id, caller_id, found, host_id=None):
             raise ValueError("a session cannot be its own partner")
         if host_id and (pair["partner"]["host"] != "codex" or host_id != "local"):
             raise ValueError("only local Codex partners support --host-id local")
+        if pair["status"] == "completed":
+            raise ValueError("completed pair cannot be reconnected")
         if pair.get('profile'):
             check_partner_profile(pair, session_id)
         if pair["status"] == "connected":
@@ -988,7 +1135,9 @@ def send(to, text, found, sender=None, sender_name=None, pair_id=None):
     if pair_id:
         message["pair_id"] = pair_id
     candidates = [s for s in found if s["id"] != sender]
-    by_id = [s for s in candidates if s["id"] == to or (len(to) >= 6 and s["id"].startswith(to))]
+    by_id = [s for s in candidates if s["id"] == to]
+    if not by_id and len(to) >= 6:
+        by_id = [s for s in candidates if s["id"].startswith(to)]
     if len(by_id) > 1:
         raise SystemExit(f"agent-sessions: {to} matches {len(by_id)} sessions; give more of the id")
     if by_id:
@@ -1313,6 +1462,21 @@ def configure_hooks(host, dry_run=False, remove=False):
         command = shlex.join([sys.executable, str(Path(__file__).resolve()),
                               "hook", "--host", "agy"])
 
+        def owned(handler):
+            if not isinstance(handler, dict) or handler.get('type') != 'command':
+                return False
+            value = handler.get('command')
+            if value == command:
+                return True
+            if remove or not isinstance(value, str):
+                return False
+            try:
+                parts = shlex.split(value)
+            except ValueError:
+                return False
+            return (len(parts) == 5 and Path(parts[1]).name == 'agent_sessions.py'
+                    and parts[2:] == ['hook', '--host', 'agy'])
+
         def merged_agy():
             try:
                 config = json.loads(path.read_text(encoding="utf-8"))
@@ -1320,16 +1484,39 @@ def configure_hooks(host, dry_run=False, remove=False):
                 config = {}
             if not isinstance(config, dict):
                 raise TypeError(f"invalid hook configuration: {path}")
-            if remove:
-                config.pop("agent-sessions", None)
+            group = config.get('agent-sessions', {})
+            if not isinstance(group, dict):
+                raise TypeError(f"invalid hook configuration: {path}")
+            group = dict(group)
+            handler = {"type": "command", "command": command, "timeout": 10}
+            for event in ('SessionStart', 'PreInvocation', 'PreToolUse', 'PostToolUse'):
+                entries = group.get(event, [])
+                if not isinstance(entries, list) or any(not isinstance(entry, dict) for entry in entries):
+                    raise ValueError(f"invalid hook configuration: {path}")
+                if event in ('PreToolUse', 'PostToolUse'):
+                    remaining = []
+                    for entry in entries:
+                        hooks = entry.get('hooks')
+                        if not isinstance(hooks, list) or any(not isinstance(item, dict) for item in hooks):
+                            raise ValueError(f"invalid hook configuration: {path}")
+                        kept = [item for item in hooks if not owned(item)]
+                        if (kept or not hooks or set(entry) - {'matcher', 'hooks'}
+                                or entry.get('matcher') != '*'):
+                            remaining.append({**entry, 'hooks': kept})
+                    if not remove:
+                        remaining.append({'matcher': '*', 'hooks': [dict(handler)]})
+                else:
+                    remaining = [entry for entry in entries if not owned(entry)]
+                    if not remove:
+                        remaining.append(dict(handler))
+                if remaining or (event in group and not entries):
+                    group[event] = remaining
+                else:
+                    group.pop(event, None)
+            if group:
+                config['agent-sessions'] = group
             else:
-                handler = {"type": "command", "command": command, "timeout": 10}
-                config["agent-sessions"] = {
-                    "SessionStart": [dict(handler)],
-                    "PreInvocation": [dict(handler)],
-                    "PreToolUse": [{"matcher": "*", "hooks": [dict(handler)]}],
-                    "PostToolUse": [{"matcher": "*", "hooks": [dict(handler)]}],
-                }
+                config.pop('agent-sessions', None)
             return config
 
         if dry_run:
@@ -1418,12 +1605,19 @@ def _main(argv=None):
     parser.add_argument("--minutes", type=int, default=ACTIVE_MINUTES,
                         help="sessions updated within this many minutes count as active")
     parser.add_argument("--json", action="store_true")
+    parser.add_argument("--version", action="version", version="%(prog)s " + VERSION)
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("protocol", help="supported managed receipt contracts")
     listing = sub.add_parser("list", help="active sessions with cwd, worktree, branch and status")
     listing.add_argument("--reviews", action="store_true", help="include Codex approval reviewers")
+    listing.add_argument("--include-completed", action="store_true", help="include completed workers")
+    listing.add_argument("--host", choices=HOST_CHOICES, help="show one native host")
+    listing.add_argument("--match", help="match session and checkout details")
     sharing = sub.add_parser("who", help="active sessions in the same repository as PATH")
     sharing.add_argument("path", nargs="?", default=".")
+    sharing.add_argument("--include-completed", action="store_true", help="include completed workers")
+    sharing.add_argument("--host", choices=HOST_CHOICES, help="show one native host")
+    sharing.add_argument("--match", help="match session and checkout details")
     sending = sub.add_parser("send", help="leave a message for a session id or every session in PATH")
     sending.add_argument("to")
     sending.add_argument("text")
@@ -1498,12 +1692,19 @@ def _main(argv=None):
                           help='run in non-interactive headless mode (agy)')
     resuming.add_argument('--output-format', choices=('text', 'json', 'stream-json'),
                           help='output format for headless mode (agy)')
+    completing = actions.add_parser('complete', help='complete a connected partner assignment')
+    completing.add_argument('pair_id')
+    completing.add_argument('--session', help='pair endpoint id (default: current session)')
+    completing.add_argument('--stop', action='store_true', help='stop a confirmed done Claude background job')
     running = actions.add_parser('run', help='run one Codex partner turn without command hooks')
     running.add_argument('pair_id')
     running.add_argument('--timeout', type=float, default=60)
     running.add_argument('--prompt-file', help='canonical UTF-8 prompt file, at most 64 KiB')
     running.add_argument('--local-provider', action='store_true', help='use the pinned loopback provider')
     running.add_argument('--no-mcp', action='store_true', help='refuse any enabled MCP server')
+    running.add_argument('--complete', action='store_true', help='complete the pair after a successful turn')
+    running.add_argument('--archive', action='store_true', help='archive the completed Codex session')
+    running.add_argument('--metrics', action='store_true', help='include native turn metrics')
     resource_parser(sub)
     args = parser.parse_args(argv)
 
@@ -1520,9 +1721,13 @@ def _main(argv=None):
 
     if args.command == 'partner' and args.partner_action == 'run':
         from managed_runs import run
-        result = run(args.pair_id, args.timeout, args.prompt_file, args.no_mcp, args.local_provider)
+        if args.archive and not args.complete:
+            raise ValueError('--archive requires --complete')
+        result = run(args.pair_id, args.timeout, args.prompt_file, args.no_mcp, args.local_provider,
+                     complete=args.complete, archive=args.archive, metrics=args.metrics)
         print(json.dumps(result, indent=2))
-        return 0 if result['status'] == 'completed' else 1
+        return 0 if result['status'] == 'completed' and (not result.get('completion') or
+                    result['completion'].get('status') == 'completed') else 1
 
     if args.command == 'profile':
         if args.profile_action == 'create':
@@ -1535,6 +1740,11 @@ def _main(argv=None):
             result = launch_profile(args.profile_id, args.resume, args.pair, args.dry_run,
                                     prompt=args.print_prompt, headless=headless,
                                     output_format=args.output_format)
+        print(json.dumps(result, indent=2))
+        return 0
+
+    if args.command == 'partner' and args.partner_action == 'complete':
+        result = complete_partner(args.pair_id, args.session or environment_session_id(), args.stop)
         print(json.dumps(result, indent=2))
         return 0
 
@@ -1627,7 +1837,8 @@ def _main(argv=None):
             print(json.dumps(result))
         return 0
 
-    found = sessions(args.minutes, getattr(args, "reviews", False))
+    selected_host = profiles.normalize_host(args.host) if args.command in ("list", "who") and args.host else None
+    found = sessions(args.minutes, getattr(args, "reviews", False), host=selected_host)
     if args.command == "partner":
         caller = args.session or self_id(os.getcwd(), found)
         validate_session_id(caller)
@@ -1652,20 +1863,28 @@ def _main(argv=None):
         # Creation requests always include the exact native tool arguments.
         print(json.dumps(result, indent=2))
         return 0
+    if args.command in ("list", "who") and not args.include_completed:
+        hidden = completed_workers(all_pairs())
+        found = [row for row in found if (row["host"], row["id"]) not in hidden]
+    if args.command in ("list", "who"):
+        found = [row for row in found if matches_session(row, args.match)]
     if args.command == "list":
         result = found
-        text = [describe(s) for s in found] or [f"No sessions active in the last {args.minutes} minutes."]
+        empty = ("No matching recent sessions." if args.host or args.match is not None
+                 else f"No sessions active in the last {args.minutes} minutes.")
+        text = [describe(s, full_id=True) for s in found] or [empty]
     elif args.command == "who":
         result = who(args.path, found)
         kind = "worktree" if result["linked"] else "main checkout"
         text = [f"{home(result['root'])} ({kind}, {result['branch']}, {result['dirty']} uncommitted)"]
         for peer in result["sessions"]:
             mark = "SAME WORKTREE " if peer["same_worktree"] else ""
-            text.append(f"- {mark}{describe(peer)}")
+            text.append(f"- {mark}{describe(peer, full_id=True)}")
             if peer["overlap"]:
                 text.append(f"  also changing: {', '.join(peer['overlap'][:10])}")
         if not result["sessions"]:
-            text.append("No other active session works in this repository.")
+            text.append("No matching recent sessions." if args.host or args.match is not None
+                        else "No other active session works in this repository.")
     elif args.command == "send":
         sender = args.session or environment_session_id()
         if sender:

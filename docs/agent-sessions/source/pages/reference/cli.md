@@ -14,11 +14,13 @@ For exact positional arguments and options, use `agent-sessions COMMAND --help`.
 
 | Command | Purpose |
 | --- | --- |
-| `list` | List recent sessions, newest first |
+| `list [--host HOST] [--match TEXT]` | List recent sessions, newest first |
 | `list --reviews` | Include Codex approval-review threads |
-| `who [PATH]` | Show sessions in a repository, including linked worktrees; PATH defaults to `.` |
+| `who [PATH] [--host HOST] [--match TEXT]` | Show sessions in a repository, including linked worktrees. PATH defaults to `.` |
 
-`SAME WORKTREE` means the same checkout. Overlapping paths compare uncommitted
+`--host` selects `codex`, `claude`, `agy` or `antigravity`. `--match` is a
+case-insensitive literal search over IDs, titles, branches and checkout paths.
+The display includes full IDs. `SAME WORKTREE` means the same checkout. Overlapping paths compare uncommitted
 files and recorded edits; they do not establish file ownership or a live process.
 
 ```sh
@@ -45,9 +47,9 @@ See [Messaging and claims](../guides/messaging.md).
 | --- | --- |
 | `configure codex` | Merge this installation's handlers into Codex settings |
 | `configure claude` | Merge this installation's handlers into Claude settings |
-| `configure agy` | Merge this installation's handlers into Antigravity hooks (`antigravity` alias accepted) |
+| `configure agy` | Merge Agent Sessions handlers into the named Antigravity hook group (`antigravity` alias accepted) |
 | `configure HOST --dry-run` | Print the merged settings without writing |
-| `configure HOST --remove` | Remove this installation's handlers, preserving other settings |
+| `configure HOST --remove` | Remove this installation’s matching handlers while preserving other entries |
 | `hook [--host codex\|claude\|agy\|antigravity]` | Read one native hook payload as JSON on stdin |
 
 `hook` is a host entry point. It uses `session_id` (`thread_id` or `conversationId`),
@@ -71,7 +73,8 @@ See [Hook setup](../guides/hooks.md).
 | `partner attach SESSION_ID [--profile PROFILE_ID]` | Record an existing worker |
 | `partner show PAIR_ID` | Inspect a saved pair and its request or launch state |
 | `partner resume PAIR_ID [--dry-run] [--print PROMPT] [--headless] [--output-format FMT]` | Resume the connected partner with its pinned profile (`--print`/`--headless`/`--output-format` for `agy`) |
-| `partner run PAIR_ID [--prompt-file FILE] [--timeout SECONDS] [--no-mcp] [--local-provider]` | Own one Codex turn with direct profile and capability checks; `--no-mcp` rejects enabled MCP servers; timeout defaults to 60 seconds |
+| `partner run PAIR_ID [--prompt-file FILE] [--timeout SECONDS] [--no-mcp] [--local-provider] [--complete] [--archive] [--metrics]` | Own one Codex turn with direct profile and capability checks. Optionally complete and archive it |
+| `partner complete PAIR_ID [--session ID] [--stop]` | Complete a connected assignment. `--stop` targets a confirmed done Claude background job |
 
 Creation, connection, attachment and resume accept `--session ID` to identify the
 caller explicitly. `partner resume` requires a connected, profiled partner.
