@@ -49,12 +49,10 @@ See [the full results and worker profiles](docs/agent-sessions/source/pages/guid
 Requires Python 3.9+, Git, and macOS or Linux.
 
 ```sh
-uv tool install git+https://github.com/cavi-ai/agent-sessions.git@v0.2.0
+uv tool install git+https://github.com/cavi-ai/agent-sessions.git@v0.3.0
 ```
 
-The currently published stable release is v0.2.0. This checkout targets 0.3.0
-and includes Antigravity support, managed local providers and peer filters.
-Install this checkout for those features:
+To work from an editable checkout, run:
 
 ```sh
 uv tool install --editable --reinstall .
