@@ -46,6 +46,26 @@ class ProfileTests(Machine):
         self.assertIn('TEST_NATIVE_TOKEN', output)
         self.assertNotIn(secret, output)
 
+    def test_pinned_model_provider_credentials_are_not_exposed_by_launch(self):
+        _, config = self.profile()
+        secret = 'synthetic-private-value-for-test'
+        for setting in ('experimental_bearer_token = "'+secret+'"',
+                        'http_headers = { Authorization = "'+secret+'" }',
+                        'query_params = { key = "'+secret+'" }',
+                        'base_url = "https://example.invalid/v1?key='+secret+'"'):
+            with self.subTest(setting=setting.split('=')[0]):
+                config.write_text('model = "fixture-model"\nmodel_provider = "fixture"\n'
+                                  '[model_providers.fixture]\n'+setting+'\n')
+                profile = json.loads(self.run_tool('profile', 'create', 'codex',
+                                                   str(self.worktree), 'private-provider'))
+                result = subprocess.run([*TOOL_CMD, 'profile', 'launch',
+                                         profile['id'], '--dry-run'], env=self.env, text=True,
+                                        capture_output=True, check=False, timeout=30)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(result.stdout, '')
+                self.assertNotIn(secret, result.stderr)
+                self.assertIn('model provider', result.stderr.lower())
+
     def test_existing_worker_can_be_attached_without_creating_another_session(self):
         pair=json.loads(self.run_tool('partner','attach','codex-sub-0002',
                                       '--session','codex-main-0001'))
@@ -207,9 +227,17 @@ class ProfileTests(Machine):
     def test_codex_overrides_round_trip_model_and_capability_values(self):
         _, config = self.profile()
         config.write_text('''model = "configured-model"
+model_provider = "gateway.with.dots"
 model_reasoning_effort = "low"
 approval_policy = "on-request"
 sandbox_mode = "read-only"
+[model_providers."gateway.with.dots"]
+name = "Worker gateway"
+base_url = "http://127.0.0.1:8095/v1"
+env_key = "WORKER_GATEWAY_KEY"
+wire_api = "responses"
+[model_providers.unused]
+name = "Unused gateway"
 [apps._default]
 enabled = false
 [features]
@@ -229,8 +257,9 @@ config = [{name = "painter", enabled = false}]
         from agent_sessions import profiles as session_profiles
         expected = session_profiles.tomllib.loads(config.read_text())
         pinned = {key: expected[key] for key in
-                  ('model', 'model_reasoning_effort', 'apps', 'features', 'mcp_servers',
+                  ('model', 'model_provider', 'model_reasoning_effort', 'apps', 'features', 'mcp_servers',
                    'plugins', 'skills')}
+        pinned['model_providers'] = {'gateway.with.dots': expected['model_providers']['gateway.with.dots']}
         profile = session_profiles.capture('codex', self.worktree, 'roundtrip')
         for session in (None, 'codex-sub-0002'):
             with self.subTest(session=session):

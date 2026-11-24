@@ -460,7 +460,7 @@ def execute(pair, receipt, persist, timeout, filename, no_mcp, profile, local, c
     if not _same_cwd(pair['partner']['cwd'], profile['cwd']):
         raise Attention('partner directory differs from profile')
     prompt, receipt['prompt_sha256'] = prompt_text(pair, filename)
-    overrides = profiles.codex_overrides(profile)
+    overrides = profiles.codex_overrides(profile, local_provider=local)
     config = profiles.tomllib.loads('\n'.join(overrides[1::2]))
     expected = capabilities(config)
     if local is not None:
@@ -468,9 +468,7 @@ def execute(pair, receipt, persist, timeout, filename, no_mcp, profile, local, c
         receipt['local_provider'] = local
         overrides += ['-c', 'cli_auth_credentials_store='+profiles._toml('ephemeral'),
                       '-c', 'model_reasoning_summary='+profiles._toml('none'),
-                      '-c', 'web_search='+profiles._toml('disabled'),
-                      '-c', 'model_provider='+profiles._toml(local['model_provider']),
-                      '-c', 'model_providers.'+local['model_provider']+'='+profiles._toml(local['provider'])]
+                      '-c', 'web_search='+profiles._toml('disabled')]
     if receipt['session_id'] and previous.get('capabilities', {}).get('memory_context') is not False:
         raise Attention('existing worker memory context was not checked; preserve its identity '
                         'and reconcile the assignment before preparing a fresh worker')

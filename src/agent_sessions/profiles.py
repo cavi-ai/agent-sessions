@@ -5,6 +5,7 @@ import json
 import re
 import stat
 from pathlib import Path
+from urllib.parse import urlsplit
 
 try:
     import tomllib
@@ -235,7 +236,45 @@ def pinned_codex_config(profile):
         raise ProfileError(f'cannot load pinned capability TOML: {exc}') from exc
 
 
-def codex_overrides(profile):
+def _codex_provider_overrides(config, local_provider):
+    if 'model' not in config or 'model_provider' not in config:
+        return {}
+    name = config['model_provider']
+    if not isinstance(name, str) or not name.strip():
+        raise ProfileError('pinned model_provider must be a nonempty string')
+    overrides = {'model_provider': name}
+    if local_provider is not None:
+        overrides['model_providers'] = {name: local_provider['provider']}
+        return overrides
+
+    providers = config.get('model_providers', {})
+    if not isinstance(providers, dict):
+        raise ProfileError('model providers must contain provider tables')
+    if name not in providers:
+        return overrides
+    definition = providers[name]
+    if not isinstance(definition, dict):
+        raise ProfileError('selected model provider must be a table')
+    if any(definition.get(key) for key in ('experimental_bearer_token', 'http_headers',
+                                          'query_params', 'auth', 'gateway_oauth', 'aws')):
+        raise ProfileError('model provider credentials cannot be exposed in command arguments; '
+                           'use env_key or env_http_headers, or define the provider in native user config')
+    for key in ('base_url', 'model_catalog_url'):
+        if key not in definition:
+            continue
+        if not isinstance(definition[key], str):
+            raise ProfileError('model provider URLs must be strings')
+        try:
+            url = urlsplit(definition[key])
+        except ValueError:
+            raise ProfileError('invalid model provider URL') from None
+        if url.username is not None or url.password is not None or url.query or url.fragment:
+            raise ProfileError('model provider URLs cannot contain credentials, queries or fragments')
+    overrides['model_providers'] = {name: definition}
+    return overrides
+
+
+def codex_overrides(profile, *, local_provider=None):
     """Repeat the pinned model, reasoning effort and capability settings as native overrides."""
     try:
         config = pinned_codex_config(profile)
@@ -250,10 +289,11 @@ def codex_overrides(profile):
             raise ProfileError('MCP inline values cannot be exposed in command arguments; use '
                                'environment references: env_vars, env_http_headers or '
                                'bearer_token_env_var')
-        result = [key+'='+_toml(config[key])
-                  for key in ('model', 'model_reasoning_effort', 'apps', 'features',
-                              'mcp_servers', 'plugins', 'skills')
-                  if key in config]
+        overrides = {key: config[key]
+                     for key in ('model', 'model_reasoning_effort', 'apps', 'features',
+                                 'mcp_servers', 'plugins', 'skills') if key in config}
+        overrides.update(_codex_provider_overrides(config, local_provider))
+        result = [key+'='+_toml(value) for key, value in overrides.items()]
         if sum(len(v.encode()) for v in result) > 65536:
             raise ProfileError('capability launch overrides exceed 64 KiB')
         return [arg for value in result for arg in ('-c', value)]
