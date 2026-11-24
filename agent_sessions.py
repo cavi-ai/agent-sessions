@@ -41,7 +41,8 @@ FOREIGN_SESSION_ENVS = ("CODEX_THREAD_ID", "CLAUDE_CODE_SESSION_ID", "CLAUDE_PID
                         "ANTIGRAVITY_CONVERSATION_ID", "ANTIGRAVITY_AGENT",
                         "OPENCODE_SESSION_ID")
 OPENCODE_EDIT_TOOLS = ("edit", "write", "patch")
-OPENCODE_PATCH_FILE_RE = re.compile(r"^\*\*\* (?:Add|Update|Delete) File: (.+)$", re.MULTILINE)
+OPENCODE_PATCH_FILE_RE = re.compile(
+    r"^\*\*\* (?:(?:Add|Update|Delete) File|Move to): (.+)$", re.MULTILINE)
 OPENCODE_PLUGIN = "agent-sessions.ts"
 
 
@@ -149,6 +150,11 @@ def agy_config_dir():
 
 def opencode_data_dir():
     return Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share") / "opencode"
+
+
+def opencode_db_path():
+    name = os.environ.get("OPENCODE_DB", "opencode.db")
+    return None if name == ":memory:" else opencode_data_dir() / name
 
 
 def opencode_config_dir():
@@ -495,14 +501,30 @@ def opencode_edited(conn, session_id, cwd):
     tables = {row[0] for row in conn.execute("select name from sqlite_master where type = 'table'")}
     if "session_message" not in tables:
         return edited
-    rows = conn.execute("select data from session_message where session_id = ? and type = "
+    rows = conn.execute("select id, data from session_message where session_id = ? and type = "
                         "'assistant' order by seq desc limit 200", (session_id,)).fetchall()
-    for (raw,) in reversed(rows):
+    parts_by_message = {}
+    if rows and "session_part" in tables:
+        ids = [message_id for message_id, _ in rows]
+        placeholders = ", ".join("?" for _ in ids)
+        for message_id, raw in conn.execute(
+                "select message_id, data from session_part where type = 'tool' "
+                f"and message_id in ({placeholders}) order by message_id, ordinal", ids):
+            try:
+                part = json.loads(raw)
+            except (TypeError, ValueError):
+                continue
+            parts_by_message.setdefault(message_id, []).append(part)
+    for message_id, raw in reversed(rows):
+        # OpenCode reads stored parts before any inline content that remains.
+        parts = parts_by_message.get(message_id, [])
         try:
             content = json.loads(raw).get("content")
         except (TypeError, ValueError, AttributeError):
-            continue
-        for part in content if isinstance(content, list) else []:
+            content = None
+        if isinstance(content, list):
+            parts.extend(content)
+        for part in parts:
             if (not isinstance(part, dict) or part.get("type") != "tool"
                     or part.get("name") not in OPENCODE_EDIT_TOOLS):
                 continue
@@ -521,8 +543,8 @@ def opencode_edited(conn, session_id, cwd):
 
 
 def opencode_sessions(since, within=None):
-    db = opencode_data_dir() / "opencode.db"
-    if not db.is_file():
+    db = opencode_db_path()
+    if db is None or not db.is_file():
         return []
     try:
         with closing(sqlite3.connect(db.absolute().as_uri() + "?mode=ro", uri=True, timeout=5)) as conn:
@@ -564,8 +586,8 @@ def opencode_sessions(since, within=None):
 
 def opencode_session(session_id):
     """Directory, parent and creation time OpenCode recorded for one session."""
-    db = opencode_data_dir() / "opencode.db"
-    if not db.is_file():
+    db = opencode_db_path()
+    if db is None or not db.is_file():
         return None
     try:
         with closing(sqlite3.connect(db.absolute().as_uri() + "?mode=ro", uri=True, timeout=5)) as conn:
@@ -1116,6 +1138,11 @@ def launch_profile(profile_id, session_id=None, pair_id=None, dry_run=False,
     env = {**os.environ, **marker}
     for var in FOREIGN_SESSION_ENVS:
         env.pop(var, None)
+    if profile['host'] == 'opencode':
+        # Keep native project configuration enabled and ignore inherited overrides.
+        for var in ('OPENCODE_CONFIG_PROJECT_DISABLE', 'OPENCODE_DISABLE_PROJECT_CONFIG',
+                    'OPENCODE_CONFIG', 'OPENCODE_CONFIG_CONTENT'):
+            env.pop(var, None)
 
     def attempt(original, pair=None):
         try:
@@ -1585,21 +1612,26 @@ import { execFile } from "node:child_process"
 
 const COMMAND: string[] = %(command)s
 
-function run(sessionID: string, event: string): Promise<{ code: number; stdout: string; stderr: string }> {
-  return new Promise((resolve) => {
+function run(sessionID: string, event: string): Promise<{ stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
     const child = execFile(COMMAND[0], COMMAND.slice(1), { timeout: 10_000, maxBuffer: 4 << 20 },
-      (error: any, stdout, stderr) => {
-        const code = !error ? 0 : typeof error.code === "number" ? error.code : 1
-        resolve({ code, stdout: String(stdout ?? ""), stderr: String(stderr ?? "") })
+      (error, stdout, stderr) => {
+        if (error) {
+          reject(new Error(stderr.trim() || `agent-sessions profile check failed: ${error.message}`))
+          return
+        }
+        resolve({ stdout, stderr })
       })
+    child.stdin?.on("error", (error) => {
+      reject(new Error(`agent-sessions profile check failed: ${error.message}`))
+    })
     child.stdin?.end(JSON.stringify({ session_id: sessionID, hook_event_name: event }))
   })
 }
 
-// Exit status 2 is a profile violation and fails the prompt or tool call.
+// A failed subprocess cannot verify the profile. Ordinary messaging errors exit successfully.
 async function context(sessionID: string, event: string): Promise<string> {
   const result = await run(sessionID, event)
-  if (result.code === 2) throw new Error(result.stderr.trim() || "agent-sessions profile check failed")
   if (result.stderr.trim()) console.error(result.stderr.trim())
   try {
     const text = JSON.parse(result.stdout || "null")?.hookSpecificOutput?.additionalContext

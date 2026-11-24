@@ -9,6 +9,7 @@
 | `AGY_HOME` | `~/.gemini/antigravity-cli` (fallback `ANTIGRAVITY_APP_DATA_DIR`) | Antigravity CLI session database and conversation records |
 | `AGY_CONFIG_DIR` | `~/.gemini/config` | Antigravity hook configuration (`hooks.json`) |
 | `XDG_DATA_HOME` | `~/.local/share` | OpenCode session database (`opencode/opencode.db`) |
+| `OPENCODE_DB` | `opencode.db` | OpenCode database filename relative to its data directory, an absolute path, or `:memory:` for sessions Agent Sessions cannot discover |
 | `OPENCODE_CONFIG_DIR` | `$XDG_CONFIG_HOME/opencode`, default `~/.config/opencode` | OpenCode global configuration and `plugins/` directory |
 | `AGENT_SESSIONS_DATA` | `~/.local/share/agent-sessions` | Queues, receipts, claims, pairs, profiles and bindings |
 | `CODEX_THREAD_ID` | Supplied by Codex | Native caller identity |
@@ -31,7 +32,7 @@ The profile marker is launcher metadata, not an account credential.
 | Codex | `threads` in the highest-numbered `state_<n>.sqlite`, opened read-only, and the tail of each thread's rollout |
 | Claude Code | `$CLAUDE_CONFIG_DIR/projects/*/<session>.jsonl`, active by modification time |
 | Antigravity (`agy`) | `$AGY_HOME/conversation_summaries.db` (read-only), plus transcripts or `step_type 132` conversation records for edited paths |
-| OpenCode | `session_v2` in `$XDG_DATA_HOME/opencode/opencode.db` (read-only), plus `edit`, `write` and `patch` tool calls in `session_message` for edited paths |
+| OpenCode | `session_v2` in the OpenCode database (read-only), plus `edit`, `write` and `patch` tool calls in `session_message` and `session_part` for edited paths |
 | Git | Current checkout, common Git directory, branch and uncommitted paths |
 
 Git discovery disables optional locks and filesystem-monitor hooks. Host database

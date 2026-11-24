@@ -63,6 +63,8 @@ OpenCode plugin fails the prompt or tool call), while Antigravity
 (`agy`) returns exit code 0 with a structured deny/terminate payload
 (`{"decision": "deny", "reason": ...}` on `PreToolUse` or
 `"terminationBehavior": "terminate"` on other events).
+OpenCode also rejects the hook when its subprocess fails to run or exits
+unsuccessfully.
 
 Hosts control when events run. A native app follow-up may reach a later tool hook.
 Use `inbox` as the first action when a turn needs queued context before other work.
