@@ -14,7 +14,8 @@ except ImportError:  # Python 3.9 and 3.10
 LIMIT = 2 * 1024 * 1024
 REQUIRED = {'codex': ('.codex/config.toml',),
             'claude': ('.claude/settings.local.json', '.mcp.json'),
-            'agy': ('.agents/settings.json', '.agents/mcp_config.json')}
+            'agy': ('.agents/settings.json', '.agents/mcp_config.json'),
+            'opencode': ('opencode.json',)}
 HOST_ALIASES = {'antigravity': 'agy'}
 AGENT_FILE_RE = re.compile(r'^\.agents/agents/([A-Za-z0-9][A-Za-z0-9_-]{0,63})(?:/agent)?\.md$')
 
@@ -366,6 +367,14 @@ def argv(profile, session_id=None, prompt=None, headless=False, output_format=No
             command += [f'--print={prompt}']
         elif prompt is not None:
             command += [f'--prompt-interactive={prompt}']
+        return command
+    if profile['host'] == 'opencode':
+        # A private server inherits the launch environment, so its hooks see the profile marker.
+        command = ['opencode', '--standalone']
+        if session_id:
+            command += ['--session', session_id]
+        if prompt is not None:
+            command += ['--prompt', prompt]
         return command
     if profile['host'] == 'codex':
         command = ['codex', *codex_overrides(profile)]

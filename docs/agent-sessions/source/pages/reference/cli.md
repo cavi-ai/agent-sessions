@@ -18,7 +18,7 @@ For exact positional arguments and options, use `agent-sessions COMMAND --help`.
 | `list --reviews` | Include Codex approval-review threads |
 | `who [PATH] [--host HOST] [--match TEXT]` | Show sessions in a repository, including linked worktrees. PATH defaults to `.` |
 
-`--host` selects `codex`, `claude`, `agy` or `antigravity`. `--match` is a
+`--host` selects `codex`, `claude`, `agy`, `antigravity` or `opencode`. `--match` is a
 case-insensitive literal search over IDs, titles, branches and checkout paths.
 The display includes full IDs. `SAME WORKTREE` means the same checkout. Overlapping paths compare uncommitted
 files and recorded edits; they do not establish file ownership or a live process.
@@ -48,9 +48,10 @@ See [Messaging and claims](../guides/messaging.md).
 | `configure codex` | Merge this installation's handlers into Codex settings |
 | `configure claude` | Merge this installation's handlers into Claude settings |
 | `configure agy` | Merge Agent Sessions handlers into the named Antigravity hook group (`antigravity` alias accepted) |
+| `configure opencode` | Write the Agent Sessions plugin to the OpenCode global plugins directory |
 | `configure HOST --dry-run` | Print the merged settings without writing |
 | `configure HOST --remove` | Remove this installation’s matching handlers while preserving other entries |
-| `hook [--host codex\|claude\|agy\|antigravity]` | Read one native hook payload as JSON on stdin |
+| `hook [--host codex\|claude\|agy\|antigravity\|opencode]` | Read one native hook payload as JSON on stdin |
 
 `hook` is a host entry point. It uses `session_id` (`thread_id` or `conversationId`),
 `cwd` (or `workspacePaths`) and `hook_event_name` (`hookEventName`); native
@@ -67,6 +68,7 @@ See [Hook setup](../guides/hooks.md).
 | --- | --- |
 | `partner claude PATH 'brief'` | Queue an invitation for a later Claude session |
 | `partner agy PATH 'brief'` | Queue an invitation for a later Antigravity session (`antigravity` alias accepted) |
+| `partner opencode PATH 'brief'` | Queue an invitation for a later OpenCode session |
 | `partner codex PATH 'brief' --project-id ID` | Save a native app creation request |
 | `partner HOST PATH 'brief' --profile PROFILE_ID` | Prepare a guarded profile launch |
 | `partner connect PAIR_ID [SESSION_ID] [--host-id local]` | Connect a discovered native endpoint; session defaults to the caller |

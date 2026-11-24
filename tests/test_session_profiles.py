@@ -79,6 +79,9 @@ class ProfileTests(Machine):
                     apath = directory / '.agents/agents' / f'{name}.md'
                 apath.parent.mkdir(parents=True, exist_ok=True)
                 apath.write_text(agent_md)
+        elif host == 'opencode':
+            config = directory / 'opencode.json'
+            config.write_text('{"$schema": "https://opencode.ai/config.json"}\n')
         else:
             config = directory / '.claude/settings.local.json'
             config.parent.mkdir(exist_ok=True)
@@ -127,6 +130,22 @@ class ProfileTests(Machine):
                 if host == 'claude':
                     self.assertIn('--strict-mcp-config', result['argv'])
                     self.assertIn('--settings', result['argv'])
+
+    def test_opencode_profile_launches_a_private_server_and_blocks_on_drift(self):
+        profile, config = self.profile('opencode')
+        self.assertEqual([f['path'] for f in profile['files']], ['opencode.json'])
+        launch = json.loads(self.run_tool('profile', 'launch', profile['id'], '--dry-run'))
+        self.assertEqual(launch['argv'], ['opencode', '--standalone'])
+        bound = self.hook_for(profile, session='ses_worker0001', host='opencode')
+        self.assertEqual(bound.returncode, 0, bound.stderr)
+        resume = json.loads(self.run_tool('profile', 'launch', profile['id'], '--resume',
+                                          'ses_worker0001', '--dry-run'))
+        self.assertEqual(resume['argv'], ['opencode', '--standalone', '--session',
+                                          'ses_worker0001'])
+        config.write_text('{"model": "other/model"}\n')
+        drifted = self.hook_for(profile, session='ses_worker0001', host='opencode')
+        self.assertEqual(drifted.returncode, 2)
+        self.assertIn('agent-sessions profile:', drifted.stderr)
 
     def test_symlinked_configuration_is_not_accepted(self):
         target = self.worktree / '.codex'

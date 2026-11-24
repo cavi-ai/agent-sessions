@@ -92,8 +92,8 @@ and queues where your workflow needs them.
 
 | Surface | Source checkout support |
 | --- | --- |
-| Native sessions | Codex, Claude Code, and Antigravity (`agy`) discovery, messaging and partner records |
-| Profiled workers | Pinned configuration with guarded launch and resume for all three hosts |
+| Native sessions | Codex, Claude Code, Antigravity (`agy`), and OpenCode discovery, messaging and partner records |
+| Profiled workers | Pinned configuration with guarded launch and resume for all four hosts |
 | Managed turns | Codex App Server execution, scope checks and saved run receipts |
 | Supervising harnesses | CLI contracts and `resource_client.ResourceClient` for resource admission, lifecycle events and checkpoint/resume |
 

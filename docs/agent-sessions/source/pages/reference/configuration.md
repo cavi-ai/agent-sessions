@@ -8,12 +8,15 @@
 | `CLAUDE_CONFIG_DIR` | `~/.claude` | Claude transcripts and hook settings |
 | `AGY_HOME` | `~/.gemini/antigravity-cli` (fallback `ANTIGRAVITY_APP_DATA_DIR`) | Antigravity CLI session database and conversation records |
 | `AGY_CONFIG_DIR` | `~/.gemini/config` | Antigravity hook configuration (`hooks.json`) |
+| `XDG_DATA_HOME` | `~/.local/share` | OpenCode session database (`opencode/opencode.db`) |
+| `OPENCODE_CONFIG_DIR` | `$XDG_CONFIG_HOME/opencode`, default `~/.config/opencode` | OpenCode global configuration and `plugins/` directory |
 | `AGENT_SESSIONS_DATA` | `~/.local/share/agent-sessions` | Queues, receipts, claims, pairs, profiles and bindings |
 | `CODEX_THREAD_ID` | Supplied by Codex | Native caller identity |
 | `CLAUDE_CODE_SESSION_ID` | Supplied by Claude Code | Native caller identity |
 | `CLAUDE_PID` | Supplied by Claude Code | Resolve caller identity when native hosts are nested |
 | `ANTIGRAVITY_CONVERSATION_ID` | Supplied by Antigravity | Native caller identity |
 | `ANTIGRAVITY_AGENT` | Supplied by Antigravity | Resolve caller identity when native hosts are nested |
+| `OPENCODE_SESSION_ID` | Supplied by OpenCode shell commands | Native caller identity |
 | `AGENT_SESSIONS_PROFILE_ID` | Set by the guarded launcher | Identify the pinned launch configuration |
 
 All configured hosts must use the same message directory. Keep it outside source control.
@@ -28,6 +31,7 @@ The profile marker is launcher metadata, not an account credential.
 | Codex | `threads` in the highest-numbered `state_<n>.sqlite`, opened read-only, and the tail of each thread's rollout |
 | Claude Code | `$CLAUDE_CONFIG_DIR/projects/*/<session>.jsonl`, active by modification time |
 | Antigravity (`agy`) | `$AGY_HOME/conversation_summaries.db` (read-only), plus transcripts or `step_type 132` conversation records for edited paths |
+| OpenCode | `session_v2` in `$XDG_DATA_HOME/opencode/opencode.db` (read-only), plus `edit`, `write` and `patch` tool calls in `session_message` for edited paths |
 | Git | Current checkout, common Git directory, branch and uncommitted paths |
 
 Git discovery disables optional locks and filesystem-monitor hooks. Host database
@@ -43,7 +47,9 @@ hidden unless requested with `list --reviews`.
 `agent-sessions` group. Codex and Claude merge handlers for `SessionStart`,
 `UserPromptSubmit`, `PreToolUse` and `PostToolUse`; Antigravity merges
 `SessionStart`, `PreInvocation`, `PreToolUse` and `PostToolUse`, preserving
-unrelated settings.
+unrelated settings. `configure opencode` writes
+`$OPENCODE_CONFIG_DIR/plugins/agent-sessions.ts` and refuses to replace a file
+it did not write.
 
 Commands include absolute interpreter and module paths plus the receiving host.
 Changing the installation path can leave obsolete handlers; see

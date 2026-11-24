@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "agent-sessions"
 version = "0.3.0"
-description = "Local session discovery and messaging for Codex, Claude Code, and Antigravity"
+description = "Local session discovery and messaging for Codex, Claude Code, Antigravity, and OpenCode"
 readme = "README.md"
 requires-python = ">=3.9"
 dependencies = ["tomli>=2,<3; python_version < '3.11'"]
