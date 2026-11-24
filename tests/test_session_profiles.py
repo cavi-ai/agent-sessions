@@ -48,11 +48,11 @@ class ProfileTests(Machine):
 
     def test_pinned_model_provider_credentials_are_not_exposed_by_launch(self):
         _, config = self.profile()
-        secret = 'synthetic-private-value-for-test'
-        for setting in ('experimental_bearer_token = "'+secret+'"',
-                        'http_headers = { Authorization = "'+secret+'" }',
-                        'query_params = { key = "'+secret+'" }',
-                        'base_url = "https://example.invalid/v1?key='+secret+'"'):
+        fixture_marker = 'synthetic-provider-value'
+        for setting in (f'experimental_bearer_token = "{fixture_marker}"',
+                        f'http_headers = {{ Authorization = "{fixture_marker}" }}',
+                        f'query_params = {{ key = "{fixture_marker}" }}',
+                        f'base_url = "https://example.invalid/v1?key={fixture_marker}"'):
             with self.subTest(setting=setting.split('=')[0]):
                 config.write_text('model = "fixture-model"\nmodel_provider = "fixture"\n'
                                   '[model_providers.fixture]\n'+setting+'\n')
@@ -63,7 +63,7 @@ class ProfileTests(Machine):
                                         capture_output=True, check=False, timeout=30)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertEqual(result.stdout, '')
-                self.assertNotIn(secret, result.stderr)
+                self.assertNotIn(fixture_marker, result.stderr)
                 self.assertIn('model provider', result.stderr.lower())
 
     def test_existing_worker_can_be_attached_without_creating_another_session(self):
