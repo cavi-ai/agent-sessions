@@ -7,8 +7,8 @@ import time
 import uuid
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-import session_profiles
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'src'))
+from agent_sessions import profiles as session_profiles
 
 path = Path(os.environ['TEST_RPC_STATE'])
 state = json.loads(path.read_text())

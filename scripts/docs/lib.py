@@ -37,10 +37,6 @@ DOCUMENTED_VERSION = _documented_version()
 OUTPUT_REL = f"docs/{PRODUCT_ID}/v{DOCUMENTED_VERSION}"
 
 
-def compare_portable_paths(left, right):
-    return -1 if left < right else 1 if left > right else 0
-
-
 def _git(*args):
     return subprocess.run(
         ["git", *args], cwd=REPO_ROOT, check=True, capture_output=True, text=True
@@ -134,7 +130,8 @@ def list_files_recursive(root):
     files = []
 
     def walk(directory, relative):
-        entries = sorted(os.scandir(directory), key=lambda entry: entry.name)
+        with os.scandir(directory) as scanned:
+            entries = sorted(scanned, key=lambda entry: entry.name)
         for entry in entries:
             path = Path(entry.path)
             name = f"{relative}/{entry.name}" if relative else entry.name
@@ -148,18 +145,12 @@ def list_files_recursive(root):
                 raise ValueError(f"documentation rejects non-file: {name}")
 
     walk(root, "")
-    return sorted(files, key=_portable_key)
-
-
-def _portable_key(value):
-    return value
+    return sorted(files)
 
 
 def compute_content_sha256(root, relative_paths):
     digest = hashlib.sha256()
-    for relative in sorted(
-        (item for item in relative_paths if item != "manifest.json"), key=_portable_key
-    ):
+    for relative in sorted(item for item in relative_paths if item != "manifest.json"):
         digest.update(relative.encode())
         digest.update(b"\0")
         digest.update((Path(root) / relative).read_bytes())

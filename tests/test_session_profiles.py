@@ -7,9 +7,10 @@ import subprocess
 import sys
 from unittest.mock import patch
 
-from test_agent_sessions import TOOL, Machine
+from test_agent_sessions import TOOL_CMD, Machine
 
 import agent_sessions
+from agent_sessions import profiles as session_profiles
 
 
 class ProfileTests(Machine):
@@ -23,7 +24,7 @@ class ProfileTests(Machine):
                 config.write_text('[mcp_servers.fixture]\ncommand = "fixture"\n'+setting+'\n')
                 profile = json.loads(self.run_tool('profile', 'create', 'codex',
                                                    str(self.worktree), 'private'))
-                result = subprocess.run([sys.executable, str(TOOL), 'profile', 'launch',
+                result = subprocess.run([*TOOL_CMD, 'profile', 'launch',
                                          profile['id'], '--dry-run'], env=self.env, text=True,
                                         capture_output=True, check=False, timeout=30)
                 self.assertNotEqual(result.returncode, 0)
@@ -95,7 +96,7 @@ class ProfileTests(Machine):
         env.update(changes)
         payload = {'session_id': session, 'cwd': profile['cwd'],
                    'hook_event_name': 'UserPromptSubmit'}
-        return subprocess.run([sys.executable, str(TOOL), 'hook', '--host', host],
+        return subprocess.run([*TOOL_CMD, 'hook', '--host', host],
                               input=json.dumps(payload), env=env, capture_output=True,
                               text=True, timeout=30, check=False)
 
@@ -113,7 +114,7 @@ class ProfileTests(Machine):
     def test_changed_configuration_blocks_profile_launch(self):
         profile, config = self.profile()
         config.write_text('changed')
-        result = subprocess.run([sys.executable, str(TOOL), 'profile', 'launch', profile['id'],
+        result = subprocess.run([*TOOL_CMD, 'profile', 'launch', profile['id'],
                                  '--dry-run'], env=self.env, capture_output=True, text=True, check=False)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('changed', result.stderr.lower())
@@ -170,7 +171,7 @@ class ProfileTests(Machine):
         target = self.worktree / '.codex'
         target.mkdir()
         (target / 'config.toml').symlink_to(self.repo / 'a.txt')
-        result = subprocess.run([sys.executable, str(TOOL), 'profile', 'create', 'codex',
+        result = subprocess.run([*TOOL_CMD, 'profile', 'create', 'codex',
                                  str(self.worktree), 'bad'], env=self.env,
                                 capture_output=True, text=True, check=False)
         self.assertNotEqual(result.returncode, 0)
@@ -183,7 +184,7 @@ class ProfileTests(Machine):
                           'config = [{name = "painter", enabled = false}]\n'
                           '[mcp_servers.fixture]\ncommand = "fixture"\n'
                           'enabled_tools = ["inspect"]\n')
-        import session_profiles
+        from agent_sessions import profiles as session_profiles
         profile = session_profiles.capture('codex', self.worktree, 'scoped')
         for session in (None, 'codex-sub-0002'):
             command = session_profiles.argv(profile, session)
@@ -198,7 +199,7 @@ class ProfileTests(Machine):
     def test_invalid_codex_toml_is_rejected_before_launch(self):
         _, config = self.profile()
         config.write_text('[broken')
-        import session_profiles
+        from agent_sessions import profiles as session_profiles
         profile = session_profiles.capture('codex', self.worktree, 'invalid')
         with self.assertRaisesRegex(session_profiles.ProfileError, 'TOML'):
             session_profiles.argv(profile)
@@ -224,7 +225,7 @@ enabled = true
 bundled = {enabled = false}
 config = [{name = "painter", enabled = false}]
 ''')
-        import session_profiles
+        from agent_sessions import profiles as session_profiles
         expected = session_profiles.tomllib.loads(config.read_text())
         capabilities = {key: expected[key] for key in
                         ('apps', 'features', 'mcp_servers', 'plugins', 'skills')}
@@ -261,7 +262,7 @@ config = [{name = "painter", enabled = false}]
         profile, _ = self.profile()
         pair = json.loads(self.run_tool('partner', 'codex', str(self.worktree), 'Check a.txt',
                                        '--profile', profile['id'], '--session', 'codex-main-0001'))
-        command = [sys.executable, str(TOOL), 'partner', 'connect', pair['id'],
+        command = [*TOOL_CMD, 'partner', 'connect', pair['id'],
                    'codex-sub-0002', '--session', 'codex-main-0001']
         rejected = subprocess.run(command, env=self.env, capture_output=True, text=True, check=False)
         self.assertNotEqual(rejected.returncode, 0)
@@ -279,7 +280,7 @@ config = [{name = "painter", enabled = false}]
                 for event in ('UserPromptSubmit', 'PreToolUse'):
                     payload = json.dumps({'session_id':session, 'cwd':profile['cwd'],
                                           'hook_event_name':event})
-                    result = subprocess.run([sys.executable, str(TOOL), 'hook', '--host', host],
+                    result = subprocess.run([*TOOL_CMD, 'hook', '--host', host],
                         input=payload, env=self.env, capture_output=True, text=True, check=False)
                     self.assertEqual(result.returncode, 2, result.stderr)
                     self.assertIn('profile launch', result.stderr)
@@ -298,7 +299,7 @@ config = [{name = "painter", enabled = false}]
         payload = json.dumps({'session_id':'claude-0006', 'cwd':profile['cwd'],
                              'hook_event_name':'UserPromptSubmit', 'agent_id':'worker'})
         env = {**self.env, 'AGENT_SESSIONS_PROFILE_ID':profile['id']}
-        command = [sys.executable, str(TOOL), 'hook', '--host', 'claude']
+        command = [*TOOL_CMD, 'hook', '--host', 'claude']
         result = subprocess.run(command, input=payload, env=env, capture_output=True,
                                 text=True, check=False)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -320,7 +321,7 @@ config = [{name = "painter", enabled = false}]
         (self.data/'bindings/codex-sub-0002.json').unlink()
         payload=json.dumps({'session_id':'codex-sub-0002','cwd':str(self.worktree),
                             'hook_event_name':'PreToolUse'})
-        result=subprocess.run([sys.executable,str(TOOL),'hook','--host','codex'],
+        result=subprocess.run([*TOOL_CMD,'hook','--host','codex'],
             input=payload,env=self.env,capture_output=True,text=True,check=False)
         self.assertEqual(result.returncode,2,result.stderr)
 
@@ -342,7 +343,7 @@ config = [{name = "painter", enabled = false}]
                               'hook_event_name':'UserPromptSubmit'})
         env = {**self.env, 'AGENT_SESSIONS_PROFILE_ID':profile['id']}
         with patch.dict(os.environ, env, clear=True), patch('sys.stdin', io.StringIO(payload)), \
-                patch('agent_sessions.write_json', side_effect=OSError('test storage unavailable')):
+                patch('agent_sessions.paths.write_json', side_effect=OSError('test storage unavailable')):
             self.assertEqual(agent_sessions.main(['hook','--host','codex']), 2)
 
     def test_profile_context_errors_block_while_legacy_hook_errors_stay_nonblocking(self):
@@ -353,7 +354,7 @@ config = [{name = "painter", enabled = false}]
         for payload in invalids:
             with self.subTest(payload=payload):
                 for env,expected in ((marked,2),(self.env,0)):
-                    result=subprocess.run([sys.executable,str(TOOL),'hook','--host','codex'],
+                    result=subprocess.run([*TOOL_CMD,'hook','--host','codex'],
                         input=payload,env=env,capture_output=True,text=True,check=False)
                     self.assertEqual(result.returncode,expected,result.stderr)
 
@@ -363,7 +364,7 @@ config = [{name = "painter", enabled = false}]
         env={**self.env,'CODEX_THREAD_ID':'codex-sub-0002'}
         for payload in ('broken json','{}','[]',''):
             with self.subTest(payload=payload):
-                result=subprocess.run([sys.executable,str(TOOL),'hook','--host','codex'],
+                result=subprocess.run([*TOOL_CMD,'hook','--host','codex'],
                     input=payload,env=env,capture_output=True,text=True,check=False)
                 self.assertEqual(result.returncode,2,result.stderr)
 
@@ -372,7 +373,7 @@ config = [{name = "painter", enabled = false}]
         env = {**self.env, 'AGENT_SESSIONS_PROFILE_ID':profile['id']}
         payload = json.dumps({'session_id':'codex-sub-0002', 'cwd':profile['cwd'],
                               'hook_event_name':'SessionStart'})
-        rejected = subprocess.run([sys.executable,str(TOOL),'hook'],input=payload,env=env,
+        rejected = subprocess.run([*TOOL_CMD,'hook'],input=payload,env=env,
                                   capture_output=True,text=True,check=False)
         self.assertEqual(rejected.returncode, 2)
         self.assertEqual(self.hook_for(profile).returncode, 0)
@@ -383,7 +384,7 @@ config = [{name = "painter", enabled = false}]
                                         '--profile', profile['id'], '--session', 'codex-main-0001'))
         old_cwd = os.getcwd()
         with patch.dict(os.environ, self.env, clear=True), \
-                patch('agent_sessions.os.chdir', side_effect=OSError('directory unavailable')):
+                patch('agent_sessions.partners.os.chdir', side_effect=OSError('directory unavailable')):
             with self.assertRaises(OSError):
                 agent_sessions.launch_profile(profile['id'], pair_id=pair['id'])
             self.assertEqual(agent_sessions.read_pair(pair['id'])['status'], 'needs_profile_launch')
@@ -395,7 +396,7 @@ config = [{name = "painter", enabled = false}]
                                         '--profile', profile['id'], '--session', 'codex-main-0001'))
         empty = self.root / 'empty-path'
         empty.mkdir()
-        result = subprocess.run([sys.executable, str(TOOL), 'profile', 'launch', profile['id'],
+        result = subprocess.run([*TOOL_CMD, 'profile', 'launch', profile['id'],
                                  '--pair', pair['id']], env={**self.env, 'PATH': str(empty)},
                                 capture_output=True, text=True, timeout=30, check=False)
         self.assertNotEqual(result.returncode, 0)
@@ -452,7 +453,7 @@ config = [{name = "painter", enabled = false}]
 
         # Ambiguous agent definitions (both dir and file) must fail
         (self.worktree / '.agents/agents/auditor.md').write_text(agent_md)
-        both = subprocess.run([sys.executable, str(TOOL), 'profile', 'create', 'agy',
+        both = subprocess.run([*TOOL_CMD, 'profile', 'create', 'agy',
                                str(self.worktree), 'auditor'], env=self.env,
                               capture_output=True, text=True, check=False)
         self.assertNotEqual(both.returncode, 0)
@@ -461,7 +462,7 @@ config = [{name = "painter", enabled = false}]
         bad_agent = self.worktree / '.agents/agents/nested/extra/agent.md'
         bad_agent.parent.mkdir(parents=True)
         bad_agent.write_text(agent_md)
-        bad = subprocess.run([sys.executable, str(TOOL), 'profile', 'create', 'agy',
+        bad = subprocess.run([*TOOL_CMD, 'profile', 'create', 'agy',
                               str(self.worktree), 'other', '--file',
                               '.agents/agents/nested/extra/agent.md'], env=self.env,
                              capture_output=True, text=True, check=False)
@@ -484,7 +485,7 @@ config = [{name = "painter", enabled = false}]
                 d.mkdir()
                 profile, _ = self.profile('agy', directory=d, name='validator',
                                           settings=settings, mcp=mcp, agent_md=agent_md)
-                res = subprocess.run([sys.executable, str(TOOL), 'profile', 'launch',
+                res = subprocess.run([*TOOL_CMD, 'profile', 'launch',
                                       profile['id'], '--dry-run'], env=self.env,
                                      capture_output=True, text=True, check=False)
                 self.assertNotEqual(res.returncode, 0)
@@ -493,13 +494,13 @@ config = [{name = "painter", enabled = false}]
 
     def test_agy_headless_and_pair_bootstrap_constraints(self):
         codex_profile, _ = self.profile('codex')
-        res = subprocess.run([sys.executable, str(TOOL), 'profile', 'launch',
+        res = subprocess.run([*TOOL_CMD, 'profile', 'launch',
                               codex_profile['id'], '--dry-run', '--print', 'hi'],
                              env=self.env, capture_output=True, text=True, check=False)
         self.assertNotEqual(res.returncode, 0)
 
         agy_profile, _ = self.profile('agy')
-        no_prompt = subprocess.run([sys.executable, str(TOOL), 'profile', 'launch',
+        no_prompt = subprocess.run([*TOOL_CMD, 'profile', 'launch',
                                     agy_profile['id'], '--dry-run', '--headless'],
                                    env=self.env, capture_output=True, text=True, check=False)
         self.assertNotEqual(no_prompt.returncode, 0)
@@ -507,7 +508,7 @@ config = [{name = "painter", enabled = false}]
         pair = json.loads(self.run_tool('partner', 'agy', str(self.worktree), 'Work',
                                         '--profile', agy_profile['id'],
                                         '--session', 'codex-main-0001'))
-        combo = subprocess.run([sys.executable, str(TOOL), 'profile', 'launch',
+        combo = subprocess.run([*TOOL_CMD, 'profile', 'launch',
                                 agy_profile['id'], '--pair', pair['id'], '--print', 'hi',
                                 '--dry-run'], env=self.env, capture_output=True, text=True,
                                check=False)
@@ -525,7 +526,7 @@ config = [{name = "painter", enabled = false}]
             'hookEventName': 'SessionStart',
             'workspacePaths': [profile['cwd']],
         })
-        ok = subprocess.run([sys.executable, str(TOOL), 'hook', '--host', 'agy'],
+        ok = subprocess.run([*TOOL_CMD, 'hook', '--host', 'agy'],
                             input=start_payload, env=env, capture_output=True,
                             text=True, check=False)
         self.assertEqual(ok.returncode, 0, ok.stderr)
@@ -533,7 +534,7 @@ config = [{name = "painter", enabled = false}]
         self.assertNotIn('terminationBehavior', ok_body)
 
         # Bare resume without marker on PreInvocation must emit terminate JSON and exit 0
-        bare_pre = subprocess.run([sys.executable, str(TOOL), 'hook', '--host', 'agy'],
+        bare_pre = subprocess.run([*TOOL_CMD, 'hook', '--host', 'agy'],
                                   input=json.dumps({
                                       'conversationId': 'agy-bound-0001',
                                       'hookEventName': 'PreInvocation',
@@ -547,7 +548,7 @@ config = [{name = "painter", enabled = false}]
 
         # Config drift on PreToolUse must emit deny JSON and exit 0
         config.write_text('{"disableSlashCommands": false}\n')
-        drift_tool = subprocess.run([sys.executable, str(TOOL), 'hook', '--host', 'agy'],
+        drift_tool = subprocess.run([*TOOL_CMD, 'hook', '--host', 'agy'],
                                     input=json.dumps({
                                         'conversationId': 'agy-bound-0001',
                                         'hookEventName': 'PreToolUse',
@@ -612,8 +613,41 @@ config = [{name = "painter", enabled = false}]
         )
         created = json.loads(self.run_tool('profile', 'create', 'agy', str(worker), 'auditor'))
         proc = subprocess.run(
-            [sys.executable, str(TOOL), 'profile', 'launch', created['id'], '--dry-run'],
+            [*TOOL_CMD, 'profile', 'launch', created['id'], '--dry-run'],
             env=self.env, capture_output=True, text=True, check=False,
         )
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn('mainAgent', proc.stderr)
+
+    def test_relative_path_normalization_prevents_agent_bypass_and_duplicates(self):
+        self.profile('agy', name='validator')
+        bad_agent = self.worktree / '.agents/agents/nested/evil.md'
+        bad_agent.parent.mkdir(parents=True)
+        bad_agent.write_text('---\nname: evil\n---\nbody\n')
+        res = subprocess.run(
+            [*TOOL_CMD, 'profile', 'create', 'agy', str(self.worktree),
+             'validator', '--file', './.agents/agents/nested/evil.md'],
+            env=self.env, capture_output=True, text=True, check=False,
+        )
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn('agent', res.stderr.lower())
+
+        codex_profile, _ = self.profile('codex')
+        dedup = json.loads(self.run_tool(
+            'profile', 'create', 'codex', str(self.worktree), 'reviewer',
+            '--file', './.codex/config.toml',
+        ))
+        self.assertEqual([f['path'] for f in dedup['files']], ['.codex/config.toml'])
+        self.assertEqual(dedup['id'], codex_profile['id'])
+        with self.assertRaises(session_profiles.ProfileError):
+            session_profiles.binding(self.data, '../escape')
+
+    def test_opencode_profile_validates_json_and_escapes_dash_prompt(self):
+        from agent_sessions import profiles as session_profiles
+        profile, config = self.profile('opencode')
+        argv = session_profiles.argv(profile, prompt='--dangerously-skip-permissions')
+        self.assertEqual(argv, ['opencode', '--standalone', '--prompt=--dangerously-skip-permissions'])
+        config.write_text('{broken json')
+        bad = session_profiles.capture('opencode', self.worktree, 'broken')
+        with self.assertRaisesRegex(session_profiles.ProfileError, 'opencode.json'):
+            session_profiles.argv(bad)

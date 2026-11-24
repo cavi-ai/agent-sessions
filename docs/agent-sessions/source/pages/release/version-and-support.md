@@ -2,8 +2,8 @@
 
 This documentation covers Agent Sessions {{PRODUCT_VERSION}}.
 The package version is declared in `pyproject.toml`. Source checkout pages may describe unreleased features. Use the matching release
-artifact for a tagged release. The earlier `v0.2.0` tag does not include
-Antigravity, managed local-provider mode or marketplace package manifests.
+artifact for a tagged release. The earlier `v0.3.0` tag does not include
+OpenCode host support or the `src/agent_sessions` package layout.
 
 ## Requirements and compatibility
 
@@ -13,7 +13,8 @@ Antigravity, managed local-provider mode or marketplace package manifests.
 | Operating system | macOS or Linux; POSIX file locking is required |
 | Git | Installed and available on `PATH` for repository inspection |
 | Codex and Claude Code | Installed separately. Discovery depends on their local record formats |
-| Antigravity (`agy`) | Installed separately; discovery depends on local record formats |
+| Antigravity (`agy`) | Installed separately; discovers both CLI (`~/.gemini/antigravity-cli`) and IDE (`~/.gemini/antigravity`) record formats |
+| OpenCode | Installed separately; discovers `opencode.db` sessions and installs a TypeScript plugin hook |
 | Codex app partner creation | Requires saved local projects and the native app tools |
 | Worker profiles | Require supplied native configuration plus loaded, trusted hooks |
 

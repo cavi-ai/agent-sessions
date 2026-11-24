@@ -98,4 +98,4 @@ ordinary messages remain available.
 
 On Python 3.9 or 3.10, `tomli` is required. Use the package installation described
 in [Installation](../introduction/installation.md), or install the checkout's
-project dependencies before running `agent_sessions.py` directly.
+project dependencies before running `python3 -m agent_sessions` directly.

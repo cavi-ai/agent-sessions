@@ -21,6 +21,9 @@ dist/
 .codex/
 .claude/
 .code-review-graph/
+.openclaw/
+.remember/
+.worktrees/
 .superpowers/
 docs/superpowers/
 /docs/agent-sessions/v*/

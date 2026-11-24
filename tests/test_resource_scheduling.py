@@ -2,11 +2,17 @@
 
 import hashlib
 import sqlite3
+import sys
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 
-from resource_broker import Broker
+SRC = str(Path(__file__).resolve().parents[1] / 'src')
+if SRC not in sys.path:
+    sys.path.insert(0, SRC)
+
+from agent_sessions.resource_broker import Broker
 
 DIGEST = hashlib.sha256(b'fixed workload').hexdigest()
 
@@ -114,7 +120,7 @@ class SchedulingTests(unittest.TestCase):
     def test_migration_preserves_existing_running_lease_without_invented_timestamps(self):
         legacy = self.root/'legacy'
         legacy.mkdir()
-        with sqlite3.connect(legacy/'resources.sqlite3') as db:
+        with closing(sqlite3.connect(legacy/'resources.sqlite3')) as db:
             db.executescript('''CREATE TABLE tickets (
                 seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE,
                 resource TEXT NOT NULL, key TEXT NOT NULL, owner TEXT NOT NULL,
@@ -123,6 +129,7 @@ class SchedulingTests(unittest.TestCase):
                 reason TEXT, evidence TEXT, UNIQUE(owner,key));''')
             db.execute('INSERT INTO tickets(id,resource,key,owner,pid,birth,seconds,deadline,state,lease,fence) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
                 ('legacy', 'shared.render', 'existing', 'session-1', 1, 'a', 600, 1600, 'running', 'b'*64, 9))
+            db.commit()
         again = Broker(legacy, identity=self.births.get, clock=lambda: self.now)
         state = again.snapshot('legacy', self.actor(1))
         self.assertEqual((state['lease'], state['fence'], state['state']), ('b'*64,9,'running'))
@@ -131,5 +138,5 @@ class SchedulingTests(unittest.TestCase):
         again.finish('legacy',self.actor(1),'b'*64,9,'completed',DIGEST)
         next_ticket=again.request('shared.render','next',self.actor(2),600)
         self.assertGreater(again.claim(next_ticket['id'],self.actor(2))['fence'],9)
-        with sqlite3.connect(legacy/'resources.sqlite3') as db:
+        with closing(sqlite3.connect(legacy/'resources.sqlite3')) as db:
             self.assertEqual(db.execute("SELECT count(*) FROM tickets WHERE id='legacy'").fetchone()[0], 1)

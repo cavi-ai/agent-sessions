@@ -8,15 +8,17 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT / "src") not in sys.path:
+    sys.path.insert(0, str(ROOT / "src"))
+
 import agent_sessions
-import managed_runs
+from agent_sessions import managed_runs
 
 try:
     import tomllib
 except ModuleNotFoundError:
     import tomli as tomllib
-
-ROOT = Path(__file__).resolve().parents[1]
 
 
 class PluginPackageTests(unittest.TestCase):
@@ -45,7 +47,8 @@ class PluginPackageTests(unittest.TestCase):
             version = tomllib.load(source)['project']['version']
         self.assertEqual(agent_sessions.VERSION, version)
         env = {key: os.environ[key] for key in ('HOME', 'PATH', 'LANG') if key in os.environ}
-        result = subprocess.run([sys.executable, str(ROOT / 'agent_sessions.py'), '--version'],
+        env['PYTHONPATH'] = str(ROOT / 'src')
+        result = subprocess.run([sys.executable, '-m', 'agent_sessions', '--version'],
                                 env=env, capture_output=True, text=True, check=True)
         self.assertEqual(result.stdout.strip(), 'agent-sessions '+version)
         with patch.object(managed_runs, 'Rpc') as rpc, patch.object(managed_runs, 'capabilities', return_value={}):

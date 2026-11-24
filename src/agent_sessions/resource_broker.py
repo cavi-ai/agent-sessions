@@ -47,7 +47,7 @@ def process_identity(pid):
         ctypes.set_errno(0)
         count = _darwin_processes().proc_pidinfo(pid, 3, 0, ctypes.byref(data), 136)
         error = ctypes.get_errno()
-        if count == 0 and error == errno.ESRCH:
+        if count == 0 and error in (errno.ESRCH, errno.EPERM):
             return None
         if count != 136 or struct.unpack_from('=I', bytes(data), 12)[0] != pid:
             raise OSError(error or errno.EIO, 'Cannot establish broker owner identity')
@@ -56,7 +56,7 @@ def process_identity(pid):
     if sys.platform.startswith('linux'):
         try:
             text = Path('/proc/'+str(pid)+'/stat').read_text()
-        except FileNotFoundError:
+        except (FileNotFoundError, PermissionError):
             return None
         fields = text.rpartition(')')[2].split()
         if len(fields) < 20:
@@ -78,7 +78,8 @@ def current_actor(session=None, *, pid=None):
     birth = process_identity(pid)
     if birth is None:
         raise ValueError('The resource owner process has exited')
-    owner = session or os.environ.get('CODEX_THREAD_ID') or os.environ.get('CLAUDE_CODE_SESSION_ID')
+    owner = (session or os.environ.get('CODEX_THREAD_ID') or os.environ.get('CLAUDE_CODE_SESSION_ID')
+             or os.environ.get('ANTIGRAVITY_CONVERSATION_ID') or os.environ.get('OPENCODE_SESSION_ID'))
     return {'id': owner or 'process-'+hashlib.sha256((str(pid)+birth).encode()).hexdigest(),
             'pid': pid, 'birth': birth}
 
@@ -106,11 +107,14 @@ class Broker:
     def __init__(self, directory, *, identity=process_identity, clock=time.time):
         self.root = Path(directory)
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.root.chmod(0o700)
         self.path = self.root / 'resources.sqlite3'
         for suffix in ('', '-wal', '-shm'):
             if Path(str(self.path)+suffix).is_symlink():
                 raise ValueError('Broker storage cannot be a symbolic link')
         self.identity, self.clock = identity, clock
+        os.close(os.open(self.path, os.O_CREAT | os.O_RDWR | getattr(os, 'O_NOFOLLOW', 0), 0o600))
+        self.path.chmod(0o600)
         with closing(sqlite3.connect(self.path, timeout=5)) as db:
             db.execute('PRAGMA synchronous=FULL')
             db.executescript('''
@@ -156,14 +160,15 @@ class Broker:
     def transaction(self):
         db = sqlite3.connect(self.path, timeout=5, isolation_level=None)
         db.row_factory = sqlite3.Row
-        db.execute('PRAGMA synchronous=FULL')
         try:
+            db.execute('PRAGMA synchronous=FULL')
             db.execute('BEGIN IMMEDIATE')
             self.sweep(db)
             yield db
             db.commit()
         except BaseException:
-            db.rollback()
+            if db.in_transaction:
+                db.rollback()
             raise
         finally:
             db.close()
@@ -338,6 +343,9 @@ class Broker:
             raise ValueError('Choose completed, failed or unresolved')
         if outcome != 'unresolved' and (not isinstance(evidence, str) or not DIGEST.fullmatch(evidence)):
             raise ValueError('Release requires a supervisor evidence digest')
+        if outcome == 'unresolved' and evidence is not None and (
+                not isinstance(evidence, str) or not DIGEST.fullmatch(evidence)):
+            raise ValueError('Unresolved evidence must be a SHA256 digest when provided')
         with self.transaction() as db:
             row = self.row(db, ticket)
             self.authorize(row, actor, lease, fence)

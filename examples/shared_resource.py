@@ -13,12 +13,17 @@ import subprocess
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from resource_client import ResourceClient, read_private, supervisor_lock, write_private
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
+from agent_sessions.resource_client import (
+    ResourceClient,
+    read_private,
+    supervisor_lock,
+    write_private,
+)
 
 
 def submit(client, handle, key, seconds):
-    if not math.isfinite(seconds) or not .001 <= seconds <= 60:
+    if isinstance(seconds, bool) or not isinstance(seconds, (int, float)) or not math.isfinite(seconds) or not .001 <= seconds <= 60:
         raise ValueError('The example workload must last 0.001 to 60 seconds')
     payload = {'kind':'fixed-python-sleep', 'seconds':seconds}
     state = client.request('example.heavy', key, payload, estimate_seconds=seconds)
@@ -41,14 +46,17 @@ def supervised_run(client, handle):
                 or proof.get('cleanup_error') is not None
                 or not (type(proof.get('exit_code')) is int or proof.get('launch')=='not-started')):
             raise ValueError('Existing proof does not establish this fixed workload exit')
-        outcome = 'completed' if proof['exit_code']==0 and not proof.get('error') else 'failed'
+        outcome = 'completed' if proof.get('exit_code') == 0 and not proof.get('error') else 'failed'
         return client.finish(state, outcome, hashlib.sha256(receipt_path.read_bytes()).hexdigest())
     if state['state'] not in ('queued','granted'):
         raise ValueError('Existing attempt cannot be replayed; reconcile its supervisor proof')
     state = client.wait(state['id'], seconds=60)
     if state['state'] != 'granted':
         return state
-    if payload.get('kind')!='fixed-python-sleep' or not .001 <= payload.get('seconds', 0) <= 60:
+    work_seconds = payload.get('seconds', 0)
+    if (payload.get('kind') != 'fixed-python-sleep' or isinstance(work_seconds, bool)
+            or not isinstance(work_seconds, (int, float))
+            or not math.isfinite(work_seconds) or not .001 <= work_seconds <= 60):
         raise ValueError('Invalid fixed example workload')
     signal=client.start(state)  # A replay acknowledges intent but cannot authorize a second launch.
     if signal.get('launch_permitted') is not True:
