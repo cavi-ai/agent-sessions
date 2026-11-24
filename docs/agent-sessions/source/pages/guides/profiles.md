@@ -248,8 +248,10 @@ configurations.
 
 All three hosts use their configured model and native permission settings.
 Claude launches repeat the settings and MCP file paths with
-`--strict-mcp-config`. Codex repeats pinned app, feature, MCP, plugin and skill
-settings as native `-c` overrides. Antigravity launches pass `--settings` for
+`--strict-mcp-config`. Codex repeats the pinned `model`,
+`model_reasoning_effort`, app, feature, MCP, plugin and skill settings as native
+`-c` overrides, so they apply even when Codex does not load the worker
+directory's `.codex/config.toml`. Antigravity launches pass `--settings` for
 `.agents/settings.json`, `--agent` when a custom agent file is pinned,
 `--disable-slash-commands` when `disableSlashCommands: true` is set, and
 `--conversation` on resume; `.agents/settings.json` must not define `hooks`.

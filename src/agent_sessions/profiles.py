@@ -236,9 +236,12 @@ def pinned_codex_config(profile):
 
 
 def codex_overrides(profile):
-    """Repeat only capability settings at the native process override layer."""
+    """Repeat the pinned model, reasoning effort and capability settings as native overrides."""
     try:
         config = pinned_codex_config(profile)
+        if any(key in config and (not isinstance(config[key], str) or not config[key].strip())
+               for key in ('model', 'model_reasoning_effort')):
+            raise ProfileError('pinned model and model_reasoning_effort must be nonempty strings')
         servers = config.get('mcp_servers', {})
         if not isinstance(servers, dict) or any(not isinstance(v, dict) for v in servers.values()):
             raise ProfileError('MCP settings must contain server tables')
@@ -248,7 +251,8 @@ def codex_overrides(profile):
                                'environment references: env_vars, env_http_headers or '
                                'bearer_token_env_var')
         result = [key+'='+_toml(config[key])
-                  for key in ('apps', 'features', 'mcp_servers', 'plugins', 'skills')
+                  for key in ('model', 'model_reasoning_effort', 'apps', 'features',
+                              'mcp_servers', 'plugins', 'skills')
                   if key in config]
         if sum(len(v.encode()) for v in result) > 65536:
             raise ProfileError('capability launch overrides exceed 64 KiB')

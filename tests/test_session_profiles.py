@@ -204,9 +204,10 @@ class ProfileTests(Machine):
         with self.assertRaisesRegex(session_profiles.ProfileError, 'TOML'):
             session_profiles.argv(profile)
 
-    def test_codex_overrides_round_trip_only_capability_values(self):
+    def test_codex_overrides_round_trip_model_and_capability_values(self):
         _, config = self.profile()
         config.write_text('''model = "configured-model"
+model_reasoning_effort = "low"
 approval_policy = "on-request"
 sandbox_mode = "read-only"
 [apps._default]
@@ -227,18 +228,26 @@ config = [{name = "painter", enabled = false}]
 ''')
         from agent_sessions import profiles as session_profiles
         expected = session_profiles.tomllib.loads(config.read_text())
-        capabilities = {key: expected[key] for key in
-                        ('apps', 'features', 'mcp_servers', 'plugins', 'skills')}
+        pinned = {key: expected[key] for key in
+                  ('model', 'model_reasoning_effort', 'apps', 'features', 'mcp_servers',
+                   'plugins', 'skills')}
         profile = session_profiles.capture('codex', self.worktree, 'roundtrip')
         for session in (None, 'codex-sub-0002'):
             with self.subTest(session=session):
                 command = session_profiles.argv(profile, session)
                 overrides = [command[i+1] for i, value in enumerate(command) if value == '-c']
-                self.assertEqual(session_profiles.tomllib.loads('\n'.join(overrides)), capabilities)
-                self.assertNotIn('model', capabilities)
+                self.assertEqual(session_profiles.tomllib.loads('\n'.join(overrides)), pinned)
                 self.assertNotIn('--model', command)
                 self.assertNotIn('--ask-for-approval', command)
                 self.assertNotIn('--sandbox', command)
+
+    def test_codex_overrides_refuse_a_pinned_model_that_is_not_a_string(self):
+        _, config = self.profile()
+        config.write_text('model = ["configured-model"]\n')
+        from agent_sessions import profiles as session_profiles
+        profile = session_profiles.capture('codex', self.worktree, 'model-shape')
+        with self.assertRaisesRegex(session_profiles.ProfileError, 'model and model_reasoning_effort'):
+            session_profiles.argv(profile)
 
     def test_profiled_partner_requires_guarded_launch_instead_of_broad_native_creation(self):
         profile, _ = self.profile()

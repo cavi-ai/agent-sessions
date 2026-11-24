@@ -469,7 +469,6 @@ def execute(pair, receipt, persist, timeout, filename, no_mcp, profile, local, c
         overrides += ['-c', 'cli_auth_credentials_store='+profiles._toml('ephemeral'),
                       '-c', 'model_reasoning_summary='+profiles._toml('none'),
                       '-c', 'web_search='+profiles._toml('disabled'),
-                      '-c', 'model='+profiles._toml(local['model']),
                       '-c', 'model_provider='+profiles._toml(local['model_provider']),
                       '-c', 'model_providers.'+local['model_provider']+'='+profiles._toml(local['provider'])]
     if receipt['session_id'] and previous.get('capabilities', {}).get('memory_context') is not False:
