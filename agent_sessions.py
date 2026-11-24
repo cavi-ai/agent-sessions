@@ -30,15 +30,20 @@ VERSION = '0.3.0'
 ACTIVE_MINUTES = 30
 TAIL_BYTES = 2_000_000
 GIT_TIMEOUT = 5
-HOSTS = ("codex", "claude", "agy")
-HOST_CHOICES = ("codex", "claude", "agy", "antigravity")
+HOSTS = ("codex", "claude", "agy", "opencode")
+HOST_CHOICES = ("codex", "claude", "agy", "antigravity", "opencode")
 EDIT_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
 AGY_EDIT_TOOLS = ("write_to_file", "replace_file_content", "multi_replace_file_content",
                   "notebook_edit", "edit_notebook", "sed_file")
 HOOK_EVENTS = ("SessionStart", "UserPromptSubmit", "PreInvocation", "PreToolUse", "PostToolUse")
 NATIVE_HOOK_EVENTS = ("SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse")
 FOREIGN_SESSION_ENVS = ("CODEX_THREAD_ID", "CLAUDE_CODE_SESSION_ID", "CLAUDE_PID",
-                        "ANTIGRAVITY_CONVERSATION_ID", "ANTIGRAVITY_AGENT")
+                        "ANTIGRAVITY_CONVERSATION_ID", "ANTIGRAVITY_AGENT",
+                        "OPENCODE_SESSION_ID")
+OPENCODE_EDIT_TOOLS = ("edit", "write", "patch")
+OPENCODE_PATCH_FILE_RE = re.compile(
+    r"^\*\*\* (?:(?:Add|Update|Delete) File|Move to): (.+)$", re.MULTILINE)
+OPENCODE_PLUGIN = "agent-sessions.ts"
 
 
 def _nearer_host(present):
@@ -63,6 +68,8 @@ def _nearer_host(present):
             return "claude"
         if (base == "agy" or "antigravity" in base) and "agy" in present:
             return "agy"
+        if base == "opencode" and "opencode" in present:
+            return "opencode"
         if not parent.isdigit():
             return None
         pid = int(parent)
@@ -74,10 +81,12 @@ def environment_session_id():
     codex = os.environ.get("CODEX_THREAD_ID")
     claude = os.environ.get("CLAUDE_CODE_SESSION_ID")
     agy = os.environ.get("ANTIGRAVITY_CONVERSATION_ID")
-    present = {k: v for k, v in (("codex", codex), ("claude", claude), ("agy", agy)) if v}
+    opencode = os.environ.get("OPENCODE_SESSION_ID")
+    present = {k: v for k, v in (("codex", codex), ("claude", claude), ("agy", agy),
+                                 ("opencode", opencode)) if v}
     if len(present) <= 1:
         return next(iter(present.values()), None)
-    if codex and claude and not agy and claude_is_nearer():
+    if codex and claude and not agy and not opencode and claude_is_nearer():
         return claude
     nearer = _nearer_host(present)
     if nearer:
@@ -86,7 +95,7 @@ def environment_session_id():
         return claude
     if agy and os.environ.get("ANTIGRAVITY_AGENT") == "1":
         return agy
-    return codex or claude or agy
+    return codex or claude or agy or opencode
 
 
 @functools.cache
@@ -137,6 +146,20 @@ def agy_home():
 
 def agy_config_dir():
     return Path(os.environ.get("AGY_CONFIG_DIR") or Path.home() / ".gemini/config")
+
+
+def opencode_data_dir():
+    return Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share") / "opencode"
+
+
+def opencode_db_path():
+    name = os.environ.get("OPENCODE_DB", "opencode.db")
+    return None if name == ":memory:" else opencode_data_dir() / name
+
+
+def opencode_config_dir():
+    return Path(os.environ.get("OPENCODE_CONFIG_DIR")
+                or Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "opencode")
 
 
 def data_dir():
@@ -472,6 +495,115 @@ def agy_sessions(since, within=None):
     return found
 
 
+def opencode_edited(conn, session_id, cwd):
+    """Files named by the latest OpenCode edit, write and patch tool calls."""
+    edited = []
+    tables = {row[0] for row in conn.execute("select name from sqlite_master where type = 'table'")}
+    if "session_message" not in tables:
+        return edited
+    rows = conn.execute("select id, data from session_message where session_id = ? and type = "
+                        "'assistant' order by seq desc limit 200", (session_id,)).fetchall()
+    parts_by_message = {}
+    if rows and "session_part" in tables:
+        ids = [message_id for message_id, _ in rows]
+        placeholders = ", ".join("?" for _ in ids)
+        for message_id, raw in conn.execute(
+                "select message_id, data from session_part where type = 'tool' "
+                f"and message_id in ({placeholders}) order by message_id, ordinal", ids):
+            try:
+                part = json.loads(raw)
+            except (TypeError, ValueError):
+                continue
+            parts_by_message.setdefault(message_id, []).append(part)
+    for message_id, raw in reversed(rows):
+        # OpenCode reads stored parts before any inline content that remains.
+        parts = parts_by_message.get(message_id, [])
+        try:
+            content = json.loads(raw).get("content")
+        except (TypeError, ValueError, AttributeError):
+            content = None
+        if isinstance(content, list):
+            parts.extend(content)
+        for part in parts:
+            if (not isinstance(part, dict) or part.get("type") != "tool"
+                    or part.get("name") not in OPENCODE_EDIT_TOOLS):
+                continue
+            state = part.get("state")
+            args = state.get("input") if isinstance(state, dict) else None
+            if not isinstance(args, dict):
+                continue
+            targets = [args.get(key) for key in ("path", "filePath", "file_path")]
+            if isinstance(args.get("patchText"), str):
+                targets += OPENCODE_PATCH_FILE_RE.findall(args["patchText"])
+            for target in targets:
+                if isinstance(target, str) and target.strip():
+                    target = target.strip()
+                    edited.append(target if os.path.isabs(target) else str(Path(cwd) / target))
+    return unique_last(edited)
+
+
+def opencode_sessions(since, within=None):
+    db = opencode_db_path()
+    if db is None or not db.is_file():
+        return []
+    try:
+        with closing(sqlite3.connect(db.absolute().as_uri() + "?mode=ro", uri=True, timeout=5)) as conn:
+            tables = {row[0] for row in conn.execute(
+                "select name from sqlite_master where type = 'table'")}
+            table = "session_v2" if "session_v2" in tables else "session"
+            if table not in tables:
+                return []
+            cols = {row[1] for row in conn.execute(f"pragma table_info({table})")}
+            if not {"id", "directory", "time_updated"} <= cols:
+                return []
+            sel = ["id", "directory", "time_updated",
+                   "coalesce(title, '')" if "title" in cols else "''",
+                   "parent_id" if "parent_id" in cols else "null",
+                   "time_busy" if "time_busy" in cols else "null",
+                   "time_idle" if "time_idle" in cols else "null"]
+            where = "and time_archived is null " if "time_archived" in cols else ""
+            rows = conn.execute(
+                f"select {', '.join(sel)} from {table} where time_updated >= ? {where}"
+                "order by time_updated desc", (int(since * 1000),)).fetchall()
+            found = []
+            for sid, cwd, updated_ms, title, parent, busy, idle in rows:
+                if not isinstance(sid, str) or not SESSION_ID_RE.fullmatch(sid) or not cwd:
+                    continue
+                if within and not inside(resolved(cwd), within):
+                    continue
+                running = busy is not None and (idle is None or busy > idle)
+                found.append({"host": "opencode", "id": sid,
+                              "title": (title.splitlines() or [""])[0][:80] if title else "",
+                              "cwd": cwd, "updated": updated_ms / 1000,
+                              "status": "running" if running else "idle", "parent": parent,
+                              "role": "subagent" if parent else None,
+                              "edited": opencode_edited(conn, sid, cwd)})
+    except sqlite3.Error as exc:
+        print(f"agent-sessions: cannot read {db}: {exc}", file=sys.stderr)
+        return []
+    return found
+
+
+def opencode_session(session_id):
+    """Directory, parent and creation time OpenCode recorded for one session."""
+    db = opencode_db_path()
+    if db is None or not db.is_file():
+        return None
+    try:
+        with closing(sqlite3.connect(db.absolute().as_uri() + "?mode=ro", uri=True, timeout=5)) as conn:
+            tables = {row[0] for row in conn.execute(
+                "select name from sqlite_master where type = 'table'")}
+            for table in ("session_v2", "session"):
+                if table in tables:
+                    row = conn.execute(f"select directory, parent_id, time_created from {table} "
+                                       "where id = ?", (session_id,)).fetchone()
+                    if row:
+                        return {"cwd": row[0], "parent": row[1], "created": row[2]}
+    except sqlite3.Error:
+        return None
+    return None
+
+
 def git(directory, *args):
     return subprocess.run(["git", "--no-optional-locks", "-c", "core.fsmonitor=false",
                            "-C", directory, *args], capture_output=True, text=True,
@@ -515,6 +647,8 @@ def sessions(minutes=ACTIVE_MINUTES, include_reviews=False, within=None, host=No
         found.extend(claude_sessions(since, within))
     if host in (None, "agy"):
         found.extend(agy_sessions(since, within))
+    if host in (None, "opencode"):
+        found.extend(opencode_sessions(since, within))
     cache = {}
     for session in found:
         session["git"] = git_state(session["cwd"], cache)
@@ -1004,6 +1138,11 @@ def launch_profile(profile_id, session_id=None, pair_id=None, dry_run=False,
     env = {**os.environ, **marker}
     for var in FOREIGN_SESSION_ENVS:
         env.pop(var, None)
+    if profile['host'] == 'opencode':
+        # Keep native project configuration enabled and ignore inherited overrides.
+        for var in ('OPENCODE_CONFIG_PROJECT_DISABLE', 'OPENCODE_DISABLE_PROJECT_CONFIG',
+                    'OPENCODE_CONFIG', 'OPENCODE_CONFIG_CONTENT'):
+            env.pop(var, None)
 
     def attempt(original, pair=None):
         try:
@@ -1323,12 +1462,12 @@ def invited(pair_id, session_id, host, started):
         return False
 
 
-def record_start(session_id):
+def record_start(session_id, started=None):
     """Remember when a session first started, so only later invitations reach it."""
     with locked(state_path(session_id)):
         state = load_state(session_id)
         if not state.get("started"):
-            state["started"] = datetime.now(timezone.utc).isoformat()
+            state["started"] = started or datetime.now(timezone.utc).isoformat()
             save_state(session_id, state)
 
 
@@ -1356,7 +1495,8 @@ def _detect_hook_host(payload, session_id=None, host=None):
     transcript = payload.get("transcript_path") or payload.get("transcriptPath")
     for candidate, root, variable in (("codex", codex_home(), "CODEX_THREAD_ID"),
                                        ("claude", claude_home(), "CLAUDE_CODE_SESSION_ID"),
-                                       ("agy", agy_home(), "ANTIGRAVITY_CONVERSATION_ID")):
+                                       ("agy", agy_home(), "ANTIGRAVITY_CONVERSATION_ID"),
+                                       ("opencode", opencode_data_dir(), "OPENCODE_SESSION_ID")):
         if ((session_id and session_id == os.environ.get(variable)) or
                 (transcript and inside(resolved(transcript), resolved(root)))):
             return candidate
@@ -1375,7 +1515,7 @@ def _hook_cwd(payload):
 
 
 def hook(payload, minutes=ACTIVE_MINUTES, host=None):
-    """Context for a Codex, Claude Code, or Antigravity hook: messages and worktree peers."""
+    """Context for a Codex, Claude Code, Antigravity or OpenCode hook: messages and peers."""
     session_id = (payload.get("session_id") or payload.get("thread_id")
                   or payload.get("conversationId"))
     host = _detect_hook_host(payload, session_id, host)
@@ -1386,6 +1526,17 @@ def hook(payload, minutes=ACTIVE_MINUTES, host=None):
     event = payload.get("hook_event_name") or payload.get("hookEventName") or "UserPromptSubmit"
     if event not in HOOK_EVENTS:
         return {} if host == "agy" else None
+    if host == "opencode":
+        validate_session_id(session_id)
+        native = opencode_session(session_id) or {}
+        if native.get("cwd") and not payload.get("cwd"):
+            payload = {**payload, "cwd": native["cwd"]}
+        if native.get("parent") and not payload.get("agent_id"):
+            # OpenCode subagents run as child sessions; route them like subagents.
+            payload = {**payload, "agent_id": native["parent"]}
+        elif isinstance(native.get("created"), (int, float)):
+            record_start(session_id, datetime.fromtimestamp(
+                _parse_timestamp(native["created"]), timezone.utc).isoformat())
     if (event == "SessionStart" and not payload.get("agent_id")
             and payload.get("source") not in ("resume", "compact")):
         record_start(session_id)
@@ -1454,9 +1605,105 @@ def has_profile_context(session_id=None):
     return any(pair.get('profile') and pair['partner']['id'] == session_id for pair in all_pairs())
 
 
+OPENCODE_PLUGIN_MARK = "// agent-sessions OpenCode plugin"
+OPENCODE_PLUGIN_SOURCE = """%(mark)s: generated by `agent-sessions configure opencode`.
+// Remove with `agent-sessions configure opencode --remove`.
+import { execFile } from "node:child_process"
+
+const COMMAND: string[] = %(command)s
+
+function run(sessionID: string, event: string): Promise<{ stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    const child = execFile(COMMAND[0], COMMAND.slice(1), { timeout: 10_000, maxBuffer: 4 << 20 },
+      (error, stdout, stderr) => {
+        if (error) {
+          reject(new Error(stderr.trim() || `agent-sessions profile check failed: ${error.message}`))
+          return
+        }
+        resolve({ stdout, stderr })
+      })
+    child.stdin?.on("error", (error) => {
+      reject(new Error(`agent-sessions profile check failed: ${error.message}`))
+    })
+    child.stdin?.end(JSON.stringify({ session_id: sessionID, hook_event_name: event }))
+  })
+}
+
+// A failed subprocess cannot verify the profile. Ordinary messaging errors exit successfully.
+async function context(sessionID: string, event: string): Promise<string> {
+  const result = await run(sessionID, event)
+  if (result.stderr.trim()) console.error(result.stderr.trim())
+  try {
+    const text = JSON.parse(result.stdout || "null")?.hookSpecificOutput?.additionalContext
+    return typeof text === "string" ? text : ""
+  } catch {
+    return ""
+  }
+}
+
+export default {
+  id: "agent-sessions",
+  async setup(ctx: any) {
+    await ctx.session.hook("prompt", async (event: any) => {
+      const text = await context(event.sessionID, "UserPromptSubmit")
+      if (text) event.prompt.text = `${event.prompt.text}\\n\\n<agent-sessions>\\n${text}\\n</agent-sessions>`
+    })
+    await ctx.tool.hook("execute.before", async (event: any) => {
+      await context(event.sessionID, "PreToolUse")
+    })
+    await ctx.tool.hook("execute.after", async (event: any) => {
+      const text = await context(event.sessionID, "PostToolUse")
+      if (text) await ctx.session.synthetic({ sessionID: event.sessionID, text })
+    })
+  },
+}
+"""
+
+
+def configure_opencode(dry_run=False, remove=False):
+    """Install or remove the OpenCode plugin file that runs this executable's hook."""
+    path = (opencode_config_dir() / "plugins" / OPENCODE_PLUGIN).resolve()
+    command = [sys.executable, str(Path(__file__).resolve()), "hook", "--host", "opencode"]
+    source = OPENCODE_PLUGIN_SOURCE % {"mark": OPENCODE_PLUGIN_MARK,
+                                       "command": json.dumps(command)}
+    config = ({"plugin": str(path), "remove": True} if remove else
+              {"plugin": str(path), "command": command, "source": source})
+
+    def installed():
+        try:
+            text = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return None
+        if not text.startswith(OPENCODE_PLUGIN_MARK):
+            raise ValueError(f"refusing to replace a plugin agent-sessions did not write: {path}")
+        return text
+
+    if dry_run:
+        installed()
+        return path, config
+    with locked(path):
+        current = installed()
+        if remove:
+            if current is not None:
+                path.unlink()
+        elif current != source:
+            # The temporary name does not end in .ts, so OpenCode never loads a partial file.
+            descriptor, name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
+            try:
+                with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                    handle.write(source)
+                os.replace(name, path)
+            finally:
+                if os.path.exists(name):
+                    os.unlink(name)
+    return path, config
+
+
 def configure_hooks(host, dry_run=False, remove=False):
     """Merge only this executable's hooks, preserving other handlers and host settings."""
     host = profiles.normalize_host(host)
+    if host == "opencode":
+        return configure_opencode(dry_run, remove)
     if host == "agy":
         path = (agy_config_dir() / "hooks.json").resolve()
         command = shlex.join([sys.executable, str(Path(__file__).resolve()),
@@ -1783,6 +2030,8 @@ def _main(argv=None):
             print(f"{'Removed' if args.remove else 'Installed'} agent-sessions hooks in {path}")
             if args.host == "codex" and not args.remove:
                 print("Review and trust the hooks in Codex Settings > Hooks or CLI /hooks.")
+            if args.host == "opencode":
+                print("Run `opencode reload` to apply the plugin change to the running service.")
         return 0
 
     if args.command == "hook":

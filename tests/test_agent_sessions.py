@@ -7,6 +7,7 @@ import sys
 import tempfile
 import time
 import unittest
+from contextlib import closing
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -40,14 +41,18 @@ class Machine(unittest.TestCase):
         self.agy = self.root / "agy"
         self.agy_config = self.root / "agy-config"
         self.data = self.root / "data"
+        self.opencode = self.root / "xdg-data" / "opencode"
+        self.opencode_config = self.root / "opencode-config"
         self.env = {**os.environ, "CODEX_HOME": str(self.codex),
                     "CLAUDE_CONFIG_DIR": str(self.claude),
                     "AGY_HOME": str(self.agy),
                     "AGY_CONFIG_DIR": str(self.agy_config),
+                    "XDG_DATA_HOME": str(self.opencode.parent),
+                    "OPENCODE_CONFIG_DIR": str(self.opencode_config),
                     "AGENT_SESSIONS_DATA": str(self.data)}
         for var in ("CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID", "CLAUDE_PID",
                     "ANTIGRAVITY_CONVERSATION_ID", "ANTIGRAVITY_AGENT",
-                    "ANTIGRAVITY_APP_DATA_DIR"):
+                    "ANTIGRAVITY_APP_DATA_DIR", "OPENCODE_SESSION_ID", "OPENCODE_DB"):
             self.env.pop(var, None)
         self.now = time.time()
         self.rows = []
@@ -1011,6 +1016,197 @@ class AgyHostTests(Machine):
         body = json.loads(proc.stdout)
         self.assertEqual(body["terminationBehavior"], "terminate")
         self.assertIn("agent-sessions hook:", proc.stderr)
+
+
+class OpenCodeHostTests(Machine):
+    """OpenCode 2.x keeps sessions in session_v2 and transcripts in session_message."""
+
+    def opencode_db(self, sessions, messages=(), path=None):
+        path = path if path is not None else self.opencode / "opencode.db"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        db = sqlite3.connect(path)
+        db.execute("create table if not exists session_v2 (id text primary key, project_id text "
+                   "not null, parent_id text, slug text not null, directory text not null, "
+                   "title text, version text not null, time_created integer not null, "
+                   "time_updated integer not null, time_archived integer, time_busy integer, "
+                   "time_idle integer)")
+        db.execute("create table if not exists session_message (id text primary key, session_id "
+                   "text not null, type text not null, seq integer not null, time_created "
+                   "integer not null, time_updated integer not null, data text not null)")
+        for row in sessions:
+            values = {"parent": None, "title": None, "created": self.now, "updated": self.now,
+                      "archived": None, "busy": None, "idle": None, **row}
+            db.execute("insert into session_v2 values (?,?,?,?,?,?,?,?,?,?,?,?)", (
+                values["id"], "project", values["parent"], "slug", str(values["cwd"]),
+                values["title"], "2.3.2", int(values["created"] * 1000),
+                int(values["updated"] * 1000), values["archived"], values["busy"], values["idle"]))
+        for seq, (session_id, tools) in enumerate(messages):
+            data = {"content": [{"type": "tool", "name": name,
+                                 "state": {"status": "completed", "input": arguments}}
+                                for name, arguments in tools]}
+            db.execute("insert into session_message values (?,?,?,?,?,?,?)", (
+                f"msg_{seq}", session_id, "assistant", seq, seq, seq, json.dumps(data)))
+        db.commit()
+        db.close()
+
+    def opencode_hook(self, session_id, event="UserPromptSubmit", env=None):
+        output = self.run_tool("hook", "--host", "opencode", env=env, stdin=json.dumps(
+            {"session_id": session_id, "hook_event_name": event}))
+        if not output.strip():
+            return ""
+        return json.loads(output)["hookSpecificOutput"]["additionalContext"]
+
+    def test_discovers_opencode_sessions_status_and_edited_files(self):
+        self.opencode_db([
+            {"id": "ses_main0001", "cwd": self.repo, "title": "Fix the parser\nmore",
+             "busy": 20, "idle": 10},
+            {"id": "ses_child0002", "cwd": self.worktree, "parent": "ses_main0001",
+             "busy": 10, "idle": 20},
+            {"id": "ses_archived0003", "cwd": self.repo, "archived": 1},
+            {"id": "ses_old0004", "cwd": self.repo, "updated": self.now - 7 * 86400},
+        ], [
+            ("ses_main0001", [("edit", {"path": str(self.repo / "a.txt")})]),
+            ("ses_main0001", [("write", {"filePath": "b.txt", "content": "x"}),
+                              ("read", {"path": str(self.repo / "c.txt")})]),
+            ("ses_main0001", [("patch", {"patchText": "*** Begin Patch\n*** Update File: "
+                                                      f"{self.repo / 'a.txt'}\n@@\n"}),]),
+            ("ses_child0002", [("edit", {"path": str(self.worktree / "a.txt")})]),
+        ])
+        found = {s["id"]: s for s in json.loads(self.run_tool("--json", "list", "--host",
+                                                              "opencode"))}
+        self.assertEqual(set(found), {"ses_main0001", "ses_child0002"})
+        main, child = found["ses_main0001"], found["ses_child0002"]
+        self.assertEqual((main["host"], main["status"], main["title"], main["edited"]),
+                         ("opencode", "running", "Fix the parser",
+                          [str(self.repo / "b.txt"), str(self.repo / "a.txt")]))
+        self.assertEqual((child["status"], child["parent"], child["role"], child["edited"]),
+                         ("idle", "ses_main0001", "subagent", [str(self.worktree / "a.txt")]))
+        peers = {s["id"]: s["overlap"]
+                 for s in json.loads(self.run_tool("--json", "who", str(self.repo)))["sessions"]}
+        self.assertEqual(peers["ses_main0001"], ["a.txt"])
+
+    def test_opencode_edit_history_combines_ordered_parts_with_inline_content(self):
+        session_id = "ses_mixed0001"
+        self.opencode_db([{"id": session_id, "cwd": self.repo}], [
+            (session_id, [("write", {"path": "earlier.txt"})]),
+            (session_id, [("edit", {"path": "inline.txt"})]),
+            (session_id, []),
+            (session_id, [("write", {"path": "later.txt"})]),
+        ])
+        with closing(sqlite3.connect(self.opencode / "opencode.db")) as db, db:
+            db.execute("create table session_part (message_id text not null, session_id text "
+                       "not null, ordinal integer not null, type text not null, call_id text, "
+                       "time_created integer not null, time_updated integer not null, "
+                       "data text not null, primary key (message_id, ordinal))")
+            for message, ordinal, name, path in [
+                ("msg_1", 3, "edit", "second.txt"),
+                ("msg_1", 1, "edit", "first.txt"),
+                ("msg_1", 2, "read", "ignore.txt"),
+                ("msg_2", 0, "write", "normalized.txt"),
+            ]:
+                data = {"type": "tool", "name": name, "state": {
+                    "status": "completed", "input": {"path": path}}}
+                db.execute("insert into session_part values (?,?,?,?,?,?,?,?)", (
+                    message, session_id, ordinal, "tool", None, 0, 0, json.dumps(data)))
+            db.execute("update session_message set data = '{}' where id = 'msg_2'")
+        found = json.loads(self.run_tool("--json", "list", "--host", "opencode"))
+        self.assertEqual(found[0]["edited"], [str(self.repo / name) for name in (
+            "earlier.txt", "first.txt", "second.txt", "inline.txt", "normalized.txt", "later.txt")])
+
+    def test_opencode_patch_move_destination_counts_for_overlap(self):
+        patch_text = ("*** Begin Patch\n*** Update File: old.txt\n*** Move to: a.txt\n"
+                      "@@\n-old\n+new\n*** End Patch\n")
+        self.opencode_db([{"id": "ses_move0001", "cwd": self.repo}], [
+            ("ses_move0001", [("patch", {"patchText": patch_text})]),
+        ])
+        peers = {s["id"]: s for s in
+                 json.loads(self.run_tool("--json", "who", str(self.repo)))["sessions"]}
+        self.assertEqual(peers["ses_move0001"]["edited"],
+                         [str(self.repo / "old.txt"), str(self.repo / "a.txt")])
+        self.assertEqual(peers["ses_move0001"]["overlap"], ["a.txt"])
+
+    def test_opencode_custom_database_is_used_for_discovery_and_hook_metadata(self):
+        self.opencode_db([{"id": "ses_default0001", "cwd": self.repo}])
+        parent, child = "ses_custom0001", "ses_custom0002"
+        self.opencode_db([
+            {"id": parent, "cwd": self.worktree, "created": self.now - 60},
+            {"id": child, "cwd": self.worktree, "parent": parent},
+        ], path=self.opencode / "custom" / "sessions.db")
+        for override in ("custom/sessions.db", str(self.opencode / "custom" / "sessions.db")):
+            with self.subTest(override=override):
+                found = json.loads(self.run_tool("--json", "list", "--host", "opencode",
+                                                env={**self.env, "OPENCODE_DB": override}))
+                self.assertEqual({s["id"] for s in found}, {parent, child})
+        env = {**self.env, "OPENCODE_DB": "custom/sessions.db"}
+        self.run_tool("send", child, "leave for the child inbox", "--session", "codex-main-0001",
+                      env=env)
+        self.assertEqual(self.opencode_hook(child, env=env), "")
+        self.assertIn("leave for the child inbox",
+                      self.opencode_hook(child, env=self.env))
+        found = self.run_tool("--json", "list", "--host", "opencode",
+                              env={**self.env, "OPENCODE_DB": ":memory:"})
+        self.assertEqual(json.loads(found), [])
+
+    def test_opencode_hook_delivers_messages_once_and_skips_child_sessions(self):
+        self.opencode_db([
+            {"id": "ses_worker0001", "cwd": self.worktree, "created": self.now - 60},
+            {"id": "ses_child0002", "cwd": self.worktree, "parent": "ses_worker0001"},
+        ])
+        self.run_tool("send", "ses_worker0001", "check security", "--session", "codex-main-0001")
+        self.assertEqual(self.opencode_hook("ses_child0002"), "")
+        self.assertEqual(self.opencode_hook("ses_worker0001", "PreToolUse"), "")
+        delivered = self.opencode_hook("ses_worker0001")
+        self.assertIn("check security", delivered)
+        self.assertIn("claude-0006", delivered)
+        self.assertNotIn("check security", self.opencode_hook("ses_worker0001", "PostToolUse"))
+
+    def test_opencode_partner_invitation_reaches_a_new_session_and_connects(self):
+        self.opencode_db([{"id": "ses_before0001", "cwd": self.worktree,
+                           "created": self.now - 3600}])
+        pair = json.loads(self.run_tool("partner", "opencode", str(self.worktree),
+                                        "Audit worktree", "--session", "codex-main-0001"))
+        self.assertEqual((pair["partner"]["host"], pair["status"]), ("opencode", "waiting"))
+        self.opencode_db([{"id": "ses_after0002", "cwd": self.worktree,
+                           "created": time.time() + 1}])
+        self.assertNotIn(pair["id"], self.opencode_hook("ses_before0001"))
+        self.assertIn(pair["id"], self.opencode_hook("ses_after0002"))
+        connected = json.loads(self.run_tool("partner", "connect", pair["id"], env={
+            **self.env, "OPENCODE_SESSION_ID": "ses_after0002"}))
+        self.assertEqual((connected["status"], connected["partner"]["id"]),
+                         ("connected", "ses_after0002"))
+
+    def test_opencode_environment_session_id_wins_inside_another_host(self):
+        self.opencode_db([{"id": "ses_env0001", "cwd": self.worktree}])
+        self.run_tool("send", "ses_env0001", "hello opencode", "--session", "codex-main-0001")
+        fake_bin = self.root / "fake-ps-opencode"
+        fake_bin.mkdir()
+        (fake_bin / "ps").write_text("#!/bin/sh\necho '1 opencode'\n")
+        (fake_bin / "ps").chmod(0o755)
+        env = {**self.env, "PATH": str(fake_bin) + os.pathsep + os.environ.get("PATH", ""),
+               "CODEX_THREAD_ID": "codex-main-0001", "OPENCODE_SESSION_ID": "ses_env0001"}
+        inbox = json.loads(self.run_tool("--json", "inbox", env=env))
+        self.assertEqual([m["text"] for m in inbox], ["hello opencode"])
+
+    def test_configure_opencode_writes_reviewable_plugin_and_removes_only_its_own(self):
+        plugin = self.opencode_config / "plugins" / "agent-sessions.ts"
+        preview = json.loads(self.run_tool("configure", "opencode", "--dry-run"))
+        self.assertEqual(preview["plugin"], str(plugin.resolve()))
+        self.assertEqual(preview["command"][-3:], ["hook", "--host", "opencode"])
+        self.assertIn(json.dumps(preview["command"]), preview["source"])
+        self.assertFalse(self.opencode_config.exists())
+        self.assertIn("opencode reload", self.run_tool("configure", "opencode"))
+        self.assertEqual(plugin.read_text(), preview["source"])
+        self.run_tool("configure", "opencode")
+        self.assertEqual(sorted(p.name for p in plugin.parent.glob("*.ts")), ["agent-sessions.ts"])
+        self.run_tool("configure", "opencode", "--remove")
+        self.assertFalse(plugin.exists())
+        plugin.write_text("export default {}\n")
+        refused = subprocess.run([sys.executable, str(TOOL), "configure", "opencode"],
+                                 env=self.env, capture_output=True, text=True, timeout=30,
+                                 check=False)
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("refusing to replace", refused.stderr)
+        self.assertEqual(plugin.read_text(), "export default {}\n")
 
 
 if __name__ == "__main__":
