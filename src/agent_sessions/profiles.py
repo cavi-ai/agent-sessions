@@ -18,6 +18,7 @@ REQUIRED = {'codex': ('.codex/config.toml',),
             'opencode': ('opencode.json',)}
 HOST_ALIASES = {'antigravity': 'agy'}
 AGENT_FILE_RE = re.compile(r'^\.agents/agents/([A-Za-z0-9][A-Za-z0-9_-]{0,63})(?:/agent)?\.md$')
+SESSION_ID_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_-]{0,199}$')
 
 
 def normalize_host(host):
@@ -49,9 +50,20 @@ def fingerprint(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
 
 
+def _canonical_relative(relative):
+    if not isinstance(relative, str) or not relative or '\\' in relative:
+        raise ProfileError('profile files must be relative paths inside the worker directory')
+    rel = Path(relative)
+    if rel.is_absolute() or '..' in rel.parts:
+        raise ProfileError('profile files must be relative paths inside the worker directory')
+    canonical = rel.as_posix()
+    if canonical in ('', '.'):
+        raise ProfileError('profile files must be relative paths inside the worker directory')
+    return canonical
+
+
 def file_record(directory, relative):
-    if (not isinstance(relative, str) or not relative or Path(relative).is_absolute()
-            or '..' in Path(relative).parts):
+    if _canonical_relative(relative) != relative:
         raise ProfileError('profile files must be relative paths inside the worker directory')
     path = directory / relative
     try:
@@ -73,7 +85,7 @@ def capture(host, directory, name, extras=()):
     root = Path(directory).expanduser().resolve(strict=True)
     if not root.is_dir():
         raise ProfileError('profile directory must exist')
-    extra_paths = set(extras)
+    extra_paths = {_canonical_relative(p) for p in extras}
     agents = _agent_files(extra_paths)
     if host == 'agy' and not agents:
         dir_agent = f'.agents/agents/{name}/agent.md'
@@ -144,6 +156,8 @@ def load(data, profile_id):
 
 
 def binding(data, session_id):
+    if not isinstance(session_id, str) or not SESSION_ID_RE.fullmatch(session_id):
+        raise ProfileError('invalid session id')
     path = Path(data) / 'bindings' / (session_id+'.json')
     try:
         if not stat.S_ISREG(path.lstat().st_mode):
@@ -214,16 +228,10 @@ def _toml(value):
 
 def pinned_codex_config(profile):
     """Read the exact pinned native configuration."""
-    root = Path(profile['cwd'])
+    raw = _read_pinned(profile, '.codex/config.toml')
     try:
-        with (root/'.codex/config.toml').open('rb') as stream:
-            raw = stream.read(LIMIT + 1)
-        expected = next(f for f in profile['files'] if f['path'] == '.codex/config.toml')
-        if len(raw) > LIMIT or hashlib.sha256(raw).hexdigest() != expected['sha256']:
-            raise ProfileError('profile configuration changed before launch')
-        config = tomllib.loads(raw.decode('utf-8'))
-        return config
-    except (OSError, UnicodeError, ValueError) as exc:
+        return tomllib.loads(raw.decode('utf-8'))
+    except (UnicodeError, ValueError) as exc:
         raise ProfileError(f'cannot load pinned capability TOML: {exc}') from exc
 
 
@@ -369,12 +377,19 @@ def argv(profile, session_id=None, prompt=None, headless=False, output_format=No
             command += [f'--prompt-interactive={prompt}']
         return command
     if profile['host'] == 'opencode':
+        raw_opencode = _read_pinned(profile, 'opencode.json')
+        try:
+            opencode_cfg = json.loads(raw_opencode.decode('utf-8'))
+        except (UnicodeError, ValueError) as exc:
+            raise ProfileError('invalid JSON in opencode.json') from exc
+        if not isinstance(opencode_cfg, dict):
+            raise ProfileError('opencode.json must be a JSON object')
         # A private server inherits the launch environment, so its hooks see the profile marker.
         command = ['opencode', '--standalone']
         if session_id:
             command += ['--session', session_id]
         if prompt is not None:
-            command += ['--prompt', prompt]
+            command += [f'--prompt={prompt}']
         return command
     if profile['host'] == 'codex':
         command = ['codex', *codex_overrides(profile)]

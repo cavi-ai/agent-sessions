@@ -10,9 +10,9 @@ import time
 import unittest
 from unittest.mock import patch
 
-from test_agent_sessions import ROOT, TOOL, Machine
+from test_agent_sessions import ROOT, TOOL_CMD, Machine
 
-import managed_runs
+from agent_sessions import managed_runs
 
 
 class ManagedRunTests(Machine):
@@ -60,7 +60,7 @@ enabled_tools = ["inspect"]
         extra = ['--prompt-file', str(prompt_file)] if prompt_file is not None else []
         if no_mcp:
             extra.append('--no-mcp')
-        result = subprocess.run([sys.executable, str(TOOL), 'partner', 'run', self.pair['id'],
+        result = subprocess.run([*TOOL_CMD, 'partner', 'run', self.pair['id'],
                                  '--timeout', timeout, *extra], env=self.env, capture_output=True,
                                 text=True, timeout=15, check=False)
         self.assertTrue(result.stdout.strip(), result.stderr)
@@ -102,7 +102,7 @@ enabled_tools = ["inspect"]
 
     def run_local(self):
         self.env['LOCAL_GATEWAY_KEY'] = 'local-test-key'
-        result = subprocess.run([sys.executable, str(TOOL), 'partner', 'run', self.pair['id'],
+        result = subprocess.run([*TOOL_CMD, 'partner', 'run', self.pair['id'],
                                  '--timeout', '5', '--local-provider'], env=self.env, check=False,
                                 capture_output=True, text=True, timeout=15)
         return json.loads(result.stdout)
@@ -147,7 +147,7 @@ enabled_tools = ["inspect"]
         self.assertEqual(self.run_pair()['status'], 'attention')
         self.assertEqual(json.loads(self.run_tool('partner', 'show', self.pair['id']))['last_run'], before)
         self.env.pop('LOCAL_GATEWAY_KEY')
-        result = subprocess.run([sys.executable, str(TOOL), 'partner', 'run', self.pair['id'],
+        result = subprocess.run([*TOOL_CMD, 'partner', 'run', self.pair['id'],
                                  '--timeout', '5', '--local-provider'], env=self.env, check=False,
                                 capture_output=True, text=True, timeout=15)
         self.assertEqual(result.returncode, 1)
@@ -246,7 +246,7 @@ enabled_tools = ["inspect"]
                     [{'type': 'text', 'text': self.pair['brief']}])
 
     def run_complete(self, *flags):
-        return subprocess.run([sys.executable, str(TOOL), 'partner', 'run', self.pair['id'],
+        return subprocess.run([*TOOL_CMD, 'partner', 'run', self.pair['id'],
                                '--timeout', '5', *flags], env=self.env, capture_output=True,
                               text=True, timeout=15, check=False)
 
@@ -556,7 +556,7 @@ enabled_tools = ["inspect"]
 
     def cancelled_run(self, signum):
         self.native(timeout=True)
-        process = subprocess.Popen([sys.executable, str(TOOL), 'partner', 'run',
+        process = subprocess.Popen([*TOOL_CMD, 'partner', 'run',
                                     self.pair['id'], '--timeout', '10'],
                                    env=self.env, stdout=subprocess.PIPE,
                                    stderr=subprocess.PIPE, text=True)
@@ -596,7 +596,7 @@ enabled_tools = ["inspect"]
         self.cancelled_run(signal.SIGINT)
 
     def test_signal_handlers_are_restored_after_a_rejected_run(self):
-        import managed_runs
+        from agent_sessions import managed_runs
         previous = {s: signal.getsignal(s) for s in (signal.SIGTERM, signal.SIGINT)}
         with self.assertRaises(ValueError):
             managed_runs.run('invalid-pair')
@@ -648,7 +648,7 @@ enabled_tools = ["inspect"]
     def test_latest_turn_requires_a_valid_turn_page(self):
         from types import SimpleNamespace
 
-        import managed_runs
+        from agent_sessions import managed_runs
         for data in ({}, '', None, [{}], ['turn']):
             with self.subTest(data=data):
                 client = SimpleNamespace(request=lambda *_, value=data: {'data': value, 'nextCursor': None})

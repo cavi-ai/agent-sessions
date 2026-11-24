@@ -1,10 +1,10 @@
 # Overview
 
-The earlier `v0.2.0` release does not include Antigravity, managed local-provider
-mode or marketplace package manifests. Use documentation from the matching tag
+The earlier `v0.3.0` release does not include OpenCode host support or the
+`src/agent_sessions` package layout. Use documentation from the matching tag
 or release artifact for a published release.
 
-Agent Sessions helps Codex, Claude Code, and Antigravity (`agy`) sessions
+Agent Sessions helps Codex, Claude Code, Antigravity (`agy`), and OpenCode sessions
 coordinate on one machine. It discovers recent sessions, compares their Git
 checkouts, and passes messages through a local queue. It also records partner
 relationships and pins a worker's native launch configuration and starting
@@ -18,7 +18,7 @@ context.
 | Ask one session to take work | `agent-sessions send SESSION_ID 'brief'` |
 | Leave work for a session under a directory | `agent-sessions send /path/to/project 'brief'` |
 | Reserve a received message and reply | `agent-sessions claim MESSAGE_ID 'ready'` |
-| Set up Codex, Claude, and Antigravity partners | [Partner sessions](../guides/partners.md) |
+| Set up Codex, Claude, Antigravity, and OpenCode partners | [Partner sessions](../guides/partners.md) |
 | Control starting context and pin worker configs | [Worker profiles](../guides/profiles.md) |
 
 ## How coordination works
@@ -35,13 +35,13 @@ access accounts or execute commands. See the [security model](../security/model.
 
 ## Sessions, partners and profiles
 
-A **session** is a discovered native Codex, Claude Code, or Antigravity (`agy`)
-conversation. Recent activity is inferred from host records; a listed session is
+A **session** is a discovered native Codex, Claude Code, Antigravity (`agy`), or
+OpenCode conversation. Recent activity is inferred from host records; a listed session is
 not necessarily running.
 
 A **partner** is a recorded relationship between two sessions. One caller can
-have several Codex, Claude Code, and Antigravity partners. Creating an ordinary
-Claude or Antigravity partner queues a path invitation; creating an ordinary
+have several Codex, Claude Code, Antigravity, and OpenCode partners. Creating an ordinary
+Claude, Antigravity, or OpenCode partner queues a path invitation; creating an ordinary
 Codex partner uses the Codex app's native tools. [Partner sessions](../guides/partners.md)
 explains both routes.
 

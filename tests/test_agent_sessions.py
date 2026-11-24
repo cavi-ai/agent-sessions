@@ -11,7 +11,10 @@ from contextlib import closing
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-TOOL = ROOT / "agent_sessions.py"
+SRC = ROOT / "src"
+if str(SRC) not in sys.path:
+    sys.path.insert(0, str(SRC))
+TOOL_CMD = [sys.executable, "-m", "agent_sessions"]
 GIT = ["git", "-c", "user.name=Test", "-c", "user.email=test@example.com",
        "-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main"]
 
@@ -49,7 +52,8 @@ class Machine(unittest.TestCase):
                     "AGY_CONFIG_DIR": str(self.agy_config),
                     "XDG_DATA_HOME": str(self.opencode.parent),
                     "OPENCODE_CONFIG_DIR": str(self.opencode_config),
-                    "AGENT_SESSIONS_DATA": str(self.data)}
+                    "AGENT_SESSIONS_DATA": str(self.data),
+                    "PYTHONPATH": str(SRC) + os.pathsep + os.environ.get("PYTHONPATH", "")}
         for var in ("CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID", "CLAUDE_PID",
                     "ANTIGRAVITY_CONVERSATION_ID", "ANTIGRAVITY_AGENT",
                     "ANTIGRAVITY_APP_DATA_DIR", "OPENCODE_SESSION_ID", "OPENCODE_DB"):
@@ -95,7 +99,7 @@ class Machine(unittest.TestCase):
                           source, str(cwd), title, None, archived, nickname))
 
     def run_tool(self, *args, stdin=None, env=None):
-        result = subprocess.run([sys.executable, str(TOOL), *args], input=stdin, text=True,
+        result = subprocess.run([*TOOL_CMD, *args], input=stdin, text=True,
                                 capture_output=True, env=env or self.env, timeout=60, check=False)
         self.assertEqual(result.returncode, 0, result.stderr)
         return result.stdout
@@ -131,7 +135,7 @@ class ListTests(Machine):
         self.assertEqual(sent['to'], [first])
         inbox = json.loads(self.run_tool('--json', 'inbox', '--session', first))
         self.assertEqual(inbox[0]['text'], 'hello')
-        ambiguous = subprocess.run([sys.executable, str(TOOL), 'send', 'same-prefix-1', 'hello',
+        ambiguous = subprocess.run([*TOOL_CMD, 'send', 'same-prefix-1', 'hello',
                                     '--session', 'codex-main-0001'], env=self.env,
                                    capture_output=True, text=True, timeout=30, check=False)
         self.assertNotEqual(ambiguous.returncode, 0)
@@ -141,14 +145,16 @@ class ListTests(Machine):
         from unittest.mock import patch
 
         import agent_sessions
-        with patch('agent_sessions.codex_sessions') as codex, \
-                patch('agent_sessions.claude_sessions') as claude, \
-                patch('agent_sessions.agy_sessions', return_value=[]) as agy, \
-                patch('agent_sessions.all_pairs', return_value=[]):
+        with patch('agent_sessions.hosts.codex_sessions') as codex, \
+                patch('agent_sessions.hosts.claude_sessions') as claude, \
+                patch('agent_sessions.hosts.agy_sessions', return_value=[]) as agy, \
+                patch('agent_sessions.hosts.opencode_sessions') as opencode, \
+                patch('agent_sessions.partners.all_pairs', return_value=[]):
             self.assertEqual(agent_sessions.sessions(host='agy'), [])
         self.assertEqual(codex.call_count, 0)
         self.assertEqual(claude.call_count, 0)
         self.assertEqual(agy.call_count, 1)
+        self.assertEqual(opencode.call_count, 0)
 
     def test_empty_filtered_discovery_uses_matching_language(self):
         self.assertEqual(self.run_tool('list', '--match', 'no-such-session').strip(),
@@ -160,7 +166,7 @@ class ListTests(Machine):
         self.assertEqual(payload, [])
 
     def test_cli_version_reports_release_version(self):
-        self.assertEqual(self.run_tool('--version').strip(), 'agent-sessions 0.3.0')
+        self.assertEqual(self.run_tool('--version').strip(), 'agent-sessions 0.4.0')
 
     def test_complete_retains_pair_and_hides_only_closed_worker(self):
         pair = json.loads(self.run_tool('partner', 'attach', 'codex-sub-0002',
@@ -175,7 +181,7 @@ class ListTests(Machine):
         self.assertNotIn('codex-sub-0002', [row['id'] for row in listed])
         listed = json.loads(self.run_tool('--json', 'list', '--include-completed'))
         self.assertIn('codex-sub-0002', [row['id'] for row in listed])
-        reopened = subprocess.run([sys.executable, str(TOOL), 'partner', 'connect', pair['id'],
+        reopened = subprocess.run([*TOOL_CMD, 'partner', 'connect', pair['id'],
                                    'codex-sub-0002', '--session', 'codex-main-0001'],
                                   env=self.env, capture_output=True, text=True, timeout=30, check=False)
         self.assertNotEqual(reopened.returncode, 0)
@@ -193,7 +199,7 @@ class ListTests(Machine):
         path = self.data / 'pairs' / (pair['id'] + '.json')
         before = path.read_bytes()
         with patch.dict(os.environ, self.env, clear=True), agent_sessions.locked(path):
-            result = subprocess.run([sys.executable, str(TOOL), 'partner', 'complete', pair['id']],
+            result = subprocess.run([*TOOL_CMD, 'partner', 'complete', pair['id']],
                                     env=self.env, capture_output=True, text=True, timeout=5, check=False)
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(path.read_bytes(), before)
@@ -216,14 +222,14 @@ class ListTests(Machine):
                  'partner': {'id': 'codex-main-0001', 'host': 'codex', 'cwd': str(self.repo)}}
         other_path = agent_path.parent / (other['id'] + '.json')
         other_path.write_text(json.dumps(other))
-        with patch.dict(os.environ, self.env, clear=True), patch('agent_sessions.subprocess.run') as invoke:
+        with patch.dict(os.environ, self.env, clear=True), patch('agent_sessions.partners.subprocess.run') as invoke:
             with self.assertRaisesRegex(ValueError, 'another open pair'):
                 agent_sessions.complete_partner(pair['id'], stop=True)
             self.assertEqual(invoke.call_count, 0)
         other_path.unlink()
         with patch.dict(os.environ, self.env, clear=True):
             for invalid in ([dict(row, state='blocked')], [row, dict(row)], [dict(row, kind='interactive')]):
-                with self.subTest(invalid=invalid), patch('agent_sessions.subprocess.run',
+                with self.subTest(invalid=invalid), patch('agent_sessions.partners.subprocess.run',
                         return_value=subprocess.CompletedProcess([], 0, json.dumps(invalid), '')) as invoke:
                     with self.assertRaises(ValueError):
                         agent_sessions.complete_partner(pair['id'], stop=True)
@@ -231,7 +237,7 @@ class ListTests(Machine):
                     self.assertEqual(json.loads(agent_path.read_text())['status'], 'connected')
             responses = [subprocess.CompletedProcess([], 0, json.dumps([row]), ''),
                          subprocess.CompletedProcess([], 0, '', '')]
-            with patch('agent_sessions.subprocess.run', side_effect=responses) as invoke:
+            with patch('agent_sessions.partners.subprocess.run', side_effect=responses) as invoke:
                 result = agent_sessions.complete_partner(pair['id'], stop=True)
             self.assertEqual(invoke.call_args_list[1].args[0], ['claude', 'stop', 'a1b2c3d4'])
             self.assertEqual(result['completion']['native_state'], 'stopped')
@@ -244,7 +250,7 @@ class ListTests(Machine):
                          {'status': 'attention', 'turn_submitted': False}):
             pair['last_run'] = last_run
             path.write_text(json.dumps(pair))
-            result = subprocess.run([sys.executable, str(TOOL), 'partner', 'complete', pair['id']],
+            result = subprocess.run([*TOOL_CMD, 'partner', 'complete', pair['id']],
                                     env=self.env, capture_output=True, text=True, timeout=30, check=False)
             self.assertNotEqual(result.returncode, 0)
             self.assertEqual(json.loads(path.read_text())['status'], 'connected')
@@ -373,7 +379,7 @@ class PartnerTests(Machine):
                                        "--project-id", "project-001", "--session", "claude-0006"))
         for peer in ("not-a-real-session", "claude-0006", "codex-sub-0002"):
             with self.subTest(peer=peer):
-                result = subprocess.run([sys.executable, str(TOOL), "partner", "connect",
+                result = subprocess.run([*TOOL_CMD, "partner", "connect",
                                          pair["id"], peer, "--session", "claude-0006"],
                                         env=self.env, text=True, capture_output=True,
                                         check=False, timeout=30)
@@ -395,7 +401,7 @@ class PartnerTests(Machine):
     def test_queue_failure_preserves_the_invitation_without_claiming_delivery(self):
         self.data.mkdir()
         (self.data / "queue").write_text("not a directory")
-        result = subprocess.run([sys.executable, str(TOOL), "partner", "claude",
+        result = subprocess.run([*TOOL_CMD, "partner", "claude",
                                  str(self.worktree), "Preserve this brief", "--session",
                                  "codex-main-0001"], env=self.env, text=True,
                                 capture_output=True, check=False, timeout=30)
@@ -438,7 +444,7 @@ class MessageTests(Machine):
                                                  "codex-main-0001")), [])
 
     def test_invalid_session_ids_cannot_escape_the_data_directory(self):
-        result = subprocess.run([sys.executable, str(TOOL), "inbox", "--session", "../../escape"],
+        result = subprocess.run([*TOOL_CMD, "inbox", "--session", "../../escape"],
                                 env=self.env, capture_output=True, text=True, timeout=30, check=False)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("invalid session id", result.stderr)
@@ -465,7 +471,7 @@ class MessageTests(Machine):
         state = self.data / "state" / "codex-main-0001.json"
         state.parent.mkdir(exist_ok=True)
         state.write_text("broken json")
-        result = subprocess.run([sys.executable, str(TOOL), "inbox", "--session", "codex-main-0001"],
+        result = subprocess.run([*TOOL_CMD, "inbox", "--session", "codex-main-0001"],
                                 env=self.env, capture_output=True, text=True, timeout=30, check=False)
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(result.stdout, "")
@@ -474,7 +480,7 @@ class MessageTests(Machine):
 
     def test_concurrent_readers_consume_a_message_only_once(self):
         self.run_tool("send", "codex-main-0001", "one delivery")
-        command = [sys.executable, str(TOOL), "--json", "inbox", "--session", "codex-main-0001"]
+        command = [*TOOL_CMD, "--json", "inbox", "--session", "codex-main-0001"]
         processes = [subprocess.Popen(command, env=self.env, stdout=subprocess.PIPE,
                                       stderr=subprocess.PIPE, text=True) for _ in range(2)]
         messages = []
@@ -592,7 +598,7 @@ class ClaimTests(Machine):
                             for mid in ("old-seen", "still-pending")]
                 legacy.write_text("".join(json.dumps(m) + "\n" for m in messages))
                 env = {**self.env, "AGENT_SESSIONS_DATA": str(data)}
-                result = subprocess.run([sys.executable, str(TOOL), "--json", "inbox",
+                result = subprocess.run([*TOOL_CMD, "--json", "inbox",
                                          "--session", "claude-0006"], env=env, text=True,
                                         capture_output=True, check=False, timeout=30)
                 self.assertNotEqual(result.returncode, 0)
@@ -615,7 +621,7 @@ class ClaimTests(Machine):
         return json.loads(out)["hookSpecificOutput"]["additionalContext"] if out else ""
 
     def claim(self, message_id, session, *text):
-        return subprocess.run([sys.executable, str(TOOL), "--json", "claim", message_id, *text,
+        return subprocess.run([*TOOL_CMD, "--json", "claim", message_id, *text,
                                "--session", session], env=self.env, text=True,
                               capture_output=True, timeout=30, check=False)
 
@@ -704,7 +710,7 @@ class HookSetupTests(Machine):
         for content in ("bad json", '[]', '{"hooks": {"PostToolUse": null}}'):
             with self.subTest(content=content):
                 path.write_text(content)
-                result = subprocess.run([sys.executable, str(TOOL), "configure", "codex"],
+                result = subprocess.run([*TOOL_CMD, "configure", "codex"],
                                         env=self.env, capture_output=True, text=True, timeout=30,
                                         check=False)
                 self.assertNotEqual(result.returncode, 0)
@@ -758,7 +764,7 @@ class AgyHostTests(Machine):
             ('codex-main-0001', 'Other host', '', str(self.now),
              json.dumps([self.repo.as_uri()]), 'CASCADE_RUN_STATUS_IDLE', '', '', 0, 0),
         ])
-        result = subprocess.run([sys.executable, str(TOOL), 'send', 'codex-main-0001', 'hello',
+        result = subprocess.run([*TOOL_CMD, 'send', 'codex-main-0001', 'hello',
                                  '--session', 'claude-0006'], env=self.env, capture_output=True,
                                 text=True, timeout=30, check=False)
         self.assertNotEqual(result.returncode, 0)
@@ -794,20 +800,20 @@ class AgyHostTests(Machine):
             'SessionStart': [{'type': 'command', 'command': 'other-start'}],
             'PreToolUse': [{'matcher': 'Read', 'hooks': [{'type': 'command', 'command': 'other-tool'}]}]}}
         path.write_text(json.dumps(original))
-        old = str(self.root / 'old' / 'agent_sessions.py')
-        new = str(self.root / 'new' / 'agent_sessions.py')
+        old_py = str(self.root / 'old-venv' / 'python3')
+        new_py = str(self.root / 'new-venv' / 'python3')
         with patch.dict(os.environ, self.env, clear=True):
-            with patch.object(agent_sessions, '__file__', old):
+            with patch('agent_sessions.hooks.sys.executable', old_py):
                 agent_sessions.configure_hooks('agy')
-            with patch.object(agent_sessions, '__file__', new):
+            with patch('agent_sessions.hooks.sys.executable', new_py):
                 agent_sessions.configure_hooks('agy')
                 installed = json.loads(path.read_text())
                 agent_sessions.configure_hooks('agy')
                 self.assertEqual(json.loads(path.read_text()), installed)
-            with patch.object(agent_sessions, '__file__', old):
+            with patch('agent_sessions.hooks.sys.executable', old_py):
                 agent_sessions.configure_hooks('agy', remove=True)
                 self.assertEqual(json.loads(path.read_text()), installed)
-            with patch.object(agent_sessions, '__file__', new):
+            with patch('agent_sessions.hooks.sys.executable', new_py):
                 agent_sessions.configure_hooks('agy', remove=True)
         self.assertEqual(json.loads(path.read_text()), original)
 
@@ -1010,7 +1016,7 @@ class AgyHostTests(Machine):
     def test_agy_hook_malformed_json_with_env_fails_closed_exit_zero(self):
         env = {**self.env, "ANTIGRAVITY_CONVERSATION_ID": "agy-badjson-0001",
                "AGENT_SESSIONS_PROFILE_ID": "prof-test-0001"}
-        proc = subprocess.run([sys.executable, str(TOOL), "hook"], input="{not-json",
+        proc = subprocess.run([*TOOL_CMD, "hook"], input="{not-json",
                               env=env, capture_output=True, text=True, check=False)
         self.assertEqual(proc.returncode, 0)
         body = json.loads(proc.stdout)
@@ -1201,12 +1207,91 @@ class OpenCodeHostTests(Machine):
         self.run_tool("configure", "opencode", "--remove")
         self.assertFalse(plugin.exists())
         plugin.write_text("export default {}\n")
-        refused = subprocess.run([sys.executable, str(TOOL), "configure", "opencode"],
+        refused = subprocess.run([*TOOL_CMD, "configure", "opencode"],
                                  env=self.env, capture_output=True, text=True, timeout=30,
                                  check=False)
         self.assertNotEqual(refused.returncode, 0)
         self.assertIn("refusing to replace", refused.stderr)
         self.assertEqual(plugin.read_text(), "export default {}\n")
+
+
+class HardeningRegressionTests(Machine):
+    def test_claude_whitespace_prompt_and_non_dict_jsonl_records_do_not_crash(self):
+        project = self.claude / "projects" / "-whitespace"
+        project.mkdir(parents=True)
+        (project / "claude-ws-0001.jsonl").write_text("\n".join([
+            "null",
+            "[]",
+            json.dumps({"type": "user", "cwd": str(self.worktree), "message": {"content": "hi"}}),
+            json.dumps({"type": "last-prompt", "lastPrompt": "   \n  "}),
+            json.dumps({"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "name": "Edit", "input": "not-a-dict"}]}}),
+        ]) + "\n")
+        found = {s["id"]: s for s in json.loads(self.run_tool("--json", "list", "--host", "claude"))}
+        self.assertEqual(found["claude-ws-0001"]["title"], "")
+
+    def test_codex_database_supports_uri_special_characters(self):
+        special = self.root / "codex # percent%"
+        special.mkdir()
+        rollout = special / "codex-special-0001.jsonl"
+        rollout.write_text("123\n" + json.dumps({"payload": "bad"}) + "\n")
+        db = sqlite3.connect(special / "state_1.sqlite")
+        try:
+            db.execute("create table threads (id text primary key, rollout_path text, "
+                       "updated_at int, source text, cwd text, archived int)")
+            db.execute("insert into threads values (?,?,?,?,?,?)",
+                       ("codex-special-0001", str(rollout), int(self.now), "cli", str(self.repo), 0))
+            db.commit()
+        finally:
+            db.close()
+        env = {**self.env, "CODEX_HOME": str(special)}
+        found = json.loads(self.run_tool("--json", "list", "--host", "codex", env=env))
+        self.assertEqual([s["id"] for s in found], ["codex-special-0001"])
+
+    def test_claim_replies_to_long_session_ids_over_64_chars(self):
+        long_sender = "session-" + ("a" * 80)
+        sent = json.loads(self.run_tool("--json", "send", "claude-0006", "long id task",
+                                        "--session", long_sender))
+        claimed = json.loads(self.run_tool("--json", "claim", sent["message"]["id"], "done",
+                                           "--session", "claude-0006"))
+        self.assertIsNotNone(claimed["reply"])
+        self.assertEqual(claimed["reply"]["to"], long_sender)
+        replies = json.loads(self.run_tool("--json", "inbox", "--session", long_sender))
+        self.assertEqual([m["text"] for m in replies], ["done"])
+
+    def test_send_to_session_id_matching_dir_name_does_not_claim_path_delivery(self):
+        clash = self.root / "claude-0006"
+        clash.mkdir()
+        out = subprocess.run([*TOOL_CMD, "send", "claude-0006", "direct only",
+                              "--session", "codex-main-0001"], cwd=self.root, env=self.env,
+                             capture_output=True, text=True, timeout=30, check=True).stdout
+        self.assertNotIn("any session that starts under", out)
+
+    def test_agy_discovers_both_cli_and_ide_default_homes(self):
+        fake_home = self.root / "fake-home"
+        for subdir, cid, title in (
+            (".gemini/antigravity-cli", "agy-cli-0001", "CLI task"),
+            (".gemini/antigravity", "agy-ide-0002", "IDE task"),
+        ):
+            target = fake_home / subdir
+            target.mkdir(parents=True)
+            with closing(sqlite3.connect(target / "conversation_summaries.db")) as db:
+                db.execute(
+                    "create table conversation_summaries ("
+                    "conversation_id text primary key, title text, preview text, "
+                    "last_modified_time text, workspace_uris text, status text, "
+                    "parent_conversation_id text, agent_name text, not_fully_idle int, killed int)"
+                )
+                db.execute(
+                    "insert into conversation_summaries values (?,?,?,?,?,?,?,?,?,?)",
+                    (cid, title, "", str(self.now), json.dumps([self.repo.as_uri()]),
+                     "CASCADE_RUN_STATUS_IDLE", "", "", 0, 0),
+                )
+                db.commit()
+        env = {k: v for k, v in self.env.items() if k not in ("AGY_HOME", "ANTIGRAVITY_APP_DATA_DIR")}
+        env["HOME"] = str(fake_home)
+        found = {s["id"]: s for s in json.loads(self.run_tool("--json", "list", "--host", "agy", env=env))}
+        self.assertEqual(set(found), {"agy-cli-0001", "agy-ide-0002"})
 
 
 if __name__ == "__main__":

@@ -71,7 +71,8 @@ Use `inbox` as the first action when a turn needs queued context before other wo
 
 ## Update, move or remove
 
-Hook commands contain absolute Python and module paths. Before moving, updating
+Hook commands invoke the installation's Python interpreter with `-m agent_sessions`
+(reconfiguration also replaces older `agent_sessions.py` handlers). Before moving, updating
 or uninstalling an installation, remove its handlers using that installation.
 Remove the old installation’s handlers before configuring the new CLI:
 

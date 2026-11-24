@@ -80,7 +80,7 @@ exit; the supervising process binds its own PID/birth identity when it claims
 the grant. Running work remains process-bound. A new attempt needs a new key;
 changed payload, estimate or deadline cannot silently reuse the old key.
 
-The packaged `resource_client.ResourceClient` supplies request, wait, start,
+The packaged `agent_sessions.resource_client.ResourceClient` supplies request, wait, start,
 finish, scoped events and token-free checkpoint/resume helpers. From a source
 checkout, try the fixed subprocess adapter:
 

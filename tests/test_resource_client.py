@@ -10,10 +10,12 @@ import threading
 import unittest
 from pathlib import Path
 
-from examples.shared_resource import run, submit
-from resource_client import ResourceClient, read_private, supervisor_lock
-
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT / 'src') not in sys.path:
+    sys.path.insert(0, str(ROOT / 'src'))
+
+from agent_sessions.resource_client import ResourceClient, read_private, supervisor_lock
+from examples.shared_resource import run, submit
 
 
 class ResourceClientTests(unittest.TestCase):
@@ -21,8 +23,12 @@ class ResourceClientTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name).resolve()
-        self.env = {**os.environ, 'AGENT_SESSIONS_DATA':str(self.root/'data')}
-        self.command = [sys.executable, str(ROOT/'agent_sessions.py')]
+        self.env = {
+            **os.environ,
+            'AGENT_SESSIONS_DATA': str(self.root / 'data'),
+            'PYTHONPATH': str(ROOT / 'src') + os.pathsep + os.environ.get('PYTHONPATH', ''),
+        }
+        self.command = [sys.executable, '-m', 'agent_sessions']
         self.client = ResourceClient(command=self.command, owner='fixture-owner', environment=self.env)
         self.handle = self.root/'run.json'
 
@@ -43,12 +49,12 @@ class ResourceClientTests(unittest.TestCase):
 
     def test_separate_requester_process_exits_then_supervisor_resumes_the_same_place(self):
         code = '''import sys
-from resource_client import ResourceClient
+from agent_sessions.resource_client import ResourceClient
 from examples.shared_resource import submit
-c=ResourceClient(command=[sys.executable,sys.argv[1]],owner='fixture-owner')
-submit(c,sys.argv[2],'compaction-attempt',.01)
+c=ResourceClient(command=[sys.executable,'-m','agent_sessions'],owner='fixture-owner')
+submit(c,sys.argv[1],'compaction-attempt',.01)
 '''
-        result = subprocess.run([sys.executable,'-c',code,str(ROOT/'agent_sessions.py'),str(self.handle)],
+        result = subprocess.run([sys.executable,'-c',code,str(self.handle)],
             env=self.env,cwd=ROOT,text=True,capture_output=True,timeout=10,check=False)
         self.assertEqual(result.returncode,0,result.stderr)
         before,_payload = self.client.resume(self.handle)
@@ -96,3 +102,21 @@ submit(c,sys.argv[2],'compaction-attempt',.01)
         self.assertCountEqual(results,['completed','refused'])
         self.assertEqual(sum(p.with_suffix('.receipt.json').exists() for p in (self.handle,other)),1)
         self.assertEqual([event['state'] for event in self.client.events()],['running','completed'])
+
+    def test_finish_unresolved_without_evidence_cancel_and_failed_resume_preserves_owner(self):
+        ticket = self.client.request('example.heavy', 'cancel-me', {'step': 1}, seconds=60)
+        cancelled = self.client.cancel(ticket['id'])
+        self.assertEqual(cancelled['state'], 'cancelled')
+
+        second = self.client.request('example.heavy', 'unresolved-me', {'step': 2}, seconds=60)
+        grant = self.client.wait(second['id'], seconds=5)
+        self.client.start(grant)
+        unresolved = self.client.finish(grant, 'unresolved')
+        self.assertEqual(unresolved['state'], 'unresolved')
+
+        bad_handle = self.root / 'missing-ticket.json'
+        self.client.checkpoint(bad_handle, {**second, 'id': '0' * 32}, {'step': 2})
+        anon = ResourceClient(command=self.command, environment=self.env)
+        with self.assertRaises(RuntimeError):
+            anon.resume(bad_handle)
+        self.assertIsNone(anon.owner)

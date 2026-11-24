@@ -62,16 +62,18 @@ def supervisor_lock(checkpoint):
     """One supervisor per attempt, including concurrent calls in the same process."""
     import fcntl
 
-    path=Path(checkpoint).absolute().with_suffix('.supervisor.lock')
-    if path!=path.resolve():
+    target = Path(checkpoint).absolute()
+    path = target.with_name(target.name + '.supervisor.lock')
+    if path != path.resolve():
         raise ValueError('Supervisor lock cannot contain symbolic links')
-    descriptor=os.open(path,os.O_CREAT|os.O_RDWR|getattr(os,'O_NOFOLLOW',0),0o600)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(path, os.O_CREAT | os.O_RDWR | getattr(os, 'O_NOFOLLOW', 0), 0o600)
     try:
-        info=os.fstat(descriptor)
-        if not stat.S_ISREG(info.st_mode) or info.st_uid!=os.getuid() or info.st_size:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_size:
             raise ValueError('Use an empty supervisor lock owned by the current user')
         try:
-            fcntl.flock(descriptor,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as failure:
             raise RuntimeError('This attempt already has a resident supervisor') from failure
         yield
@@ -91,10 +93,12 @@ class ResourceClient:
         owner = ['--session', self.owner] if self.owner is not None else []
         result = subprocess.run([*self.command, 'resource', *owner, action, *map(str, arguments)],
             env=self.environment, capture_output=True, text=True, timeout=timeout, check=False)
-        if result.returncode or len(result.stdout) > LIMIT:
+        if result.returncode:
             raise RuntimeError('Resource broker refused '+action+': '+result.stderr.strip()[:512])
+        if len(result.stdout.encode('utf-8')) > LIMIT:
+            raise RuntimeError('Resource broker response exceeds 64 KiB for '+action)
         value = json.loads(result.stdout)
-        if not isinstance(value, list if action=='events' else dict):
+        if not isinstance(value, list if action == 'events' else dict):
             raise TypeError('Invalid resource broker response')
         return value
 
@@ -110,15 +114,20 @@ class ResourceClient:
     def status(self, ticket):
         return self.call('status', ticket)
 
+    def cancel(self, ticket):
+        return self.call('cancel', ticket)
+
     def wait(self, ticket, *, seconds=60, keep=True):
         return self.call('wait', ticket, '--seconds', seconds, *(['--keep'] if keep else []), timeout=seconds+10)
 
     def start(self, grant):
         return self.call('start', grant['id'], '--lease', grant['lease'], '--fence', grant['fence'])
 
-    def finish(self, grant, outcome, evidence):
-        return self.call('finish', grant['id'], '--lease', grant['lease'], '--fence', grant['fence'],
-                         '--outcome', outcome, '--evidence', evidence)
+    def finish(self, grant, outcome, evidence=None):
+        args = [grant['id'], '--lease', grant['lease'], '--fence', grant['fence'], '--outcome', outcome]
+        if evidence is not None:
+            args.extend(['--evidence', evidence])
+        return self.call('finish', *args)
 
     def events(self, after=0):
         return self.call('events', '--lifecycle', '--after', after)
@@ -130,11 +139,11 @@ class ResourceClient:
         value = {'kind':'resource-checkpoint', 'version':1, 'ticket':ticket['id'],
                  'owner':ticket['owner'], 'resource':ticket['resource'], 'key':ticket['key'],
                  'payload_sha256':ticket['payload_sha256'], 'payload':payload}
-        if Path(path).exists():
-            if read_private(path) != value:
-                raise ValueError('Checkpoint already belongs to a different request')
-        else:
+        try:
             write_private(path, value)
+        except FileExistsError:
+            if read_private(path) != value:
+                raise ValueError('Checkpoint already belongs to a different request') from None
         return value
 
     def resume(self, path):
@@ -145,8 +154,13 @@ class ResourceClient:
         # Explicit owner IDs retain a same-user recovery namespace, not OS authentication.
         if self.owner is not None and self.owner != handle['owner']:
             raise ValueError('Checkpoint belongs to a different logical owner')
+        previous_owner = self.owner
         self.owner = handle['owner']
-        state = self.status(handle['ticket'])
-        if any(state.get(key)!=handle[key] for key in ('owner','resource','key','payload_sha256')):
-            raise ValueError('Checkpoint no longer matches its authoritative ticket')
+        try:
+            state = self.status(handle['ticket'])
+            if any(state.get(key)!=handle[key] for key in ('owner','resource','key','payload_sha256')):
+                raise ValueError('Checkpoint no longer matches its authoritative ticket')
+        except BaseException:
+            self.owner = previous_owner
+            raise
         return state, handle['payload']

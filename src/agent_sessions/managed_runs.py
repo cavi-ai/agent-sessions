@@ -17,8 +17,7 @@ from collections import deque
 from pathlib import Path
 from urllib.parse import urlsplit
 
-import agent_sessions as storage
-import session_profiles as profiles
+from . import partners, paths, profiles
 
 TEXT_LIMIT = 65536
 FRAME_LIMIT = 2 * 1024 * 1024
@@ -35,8 +34,9 @@ class NativeError(Attention):
 
     def __init__(self, method, error):
         self.method = method
-        self.code = error.get('code')
-        self.message = str(error.get('message', ''))[:800]
+        details = error if isinstance(error, dict) else {'message': error}
+        self.code = details.get('code')
+        self.message = str(details.get('message', ''))[:800]
         super().__init__(f'native RPC rejected: {method} [{self.code}]: {self.message}')
 
 
@@ -60,7 +60,7 @@ def local_child_env(local, config):
         names.update(headers.values())
         if bearer:
             names.add(bearer)
-    names.difference_update((*storage.FOREIGN_SESSION_ENVS, 'AGENT_SESSIONS_PROFILE_ID'))
+    names.difference_update((*paths.FOREIGN_SESSION_ENVS, 'AGENT_SESSIONS_PROFILE_ID'))
     return {name: os.environ[name] for name in names if name in os.environ}
 
 
@@ -108,7 +108,7 @@ class TurnMetrics:
 class Rpc:
     def __init__(self, profile, overrides, child_env=None):
         env = dict(os.environ) if child_env is None else child_env
-        for name in (*storage.FOREIGN_SESSION_ENVS, 'AGENT_SESSIONS_PROFILE_ID'):
+        for name in (*paths.FOREIGN_SESSION_ENVS, 'AGENT_SESSIONS_PROFILE_ID'):
             env.pop(name, None)
         self.process = subprocess.Popen(['codex', *overrides, 'app-server', '--stdio'],
             cwd=profile['cwd'], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -117,20 +117,29 @@ class Rpc:
         self.events = deque()
         self.counter = 0
         self.metrics = None
+        self._closed = threading.Event()
         os.set_blocking(self.process.stdin.fileno(), False)
         threading.Thread(target=self._read, daemon=True).start()
 
+    def _enqueue(self, item):
+        while not self._closed.is_set():
+            try:
+                self.incoming.put(item, timeout=0.1)
+                return
+            except queue.Full:
+                continue
+
     def _read(self):
         try:
-            while True:
+            while not self._closed.is_set():
                 line = self.process.stdout.readline(FRAME_LIMIT + 1)
                 if not line:
                     raise ValueError('owned App Server closed its transport')
                 if len(line) > FRAME_LIMIT:
                     raise ValueError('native response exceeds 2 MiB')
-                self.incoming.put(json.loads(line))
+                self._enqueue(json.loads(line))
         except (OSError, ValueError) as exc:
-            self.incoming.put(exc)
+            self._enqueue(exc)
 
     def send(self, message, deadline):
         data = memoryview((json.dumps(message)+'\n').encode())
@@ -175,6 +184,7 @@ class Rpc:
                 self.events.append(message)
 
     def close(self):
+        self._closed.set()
         try:
             self.process.stdin.close()
         except OSError:
@@ -188,7 +198,10 @@ class Rpc:
             except subprocess.TimeoutExpired:
                 self.process.kill()
                 self.process.wait(timeout=1)
-        self.process.stdout.close()
+        try:
+            self.process.stdout.close()
+        except (OSError, ValueError):
+            pass
 
 
 def prompt_text(pair, filename):
@@ -220,15 +233,24 @@ def prompt_text(pair, filename):
 
 
 def capabilities(config):
+    if not isinstance(config, dict):
+        raise Attention('native configuration must be a mapping')
     features, skills = config.get('features', {}), config.get('skills', {})
+    if not isinstance(features, dict) or not isinstance(skills, dict):
+        raise Attention('managed runs require hooks, apps, plugins, skill_search and '
+                        'automatic skill instructions and memories disabled')
     if (any(features.get(name) is not False for name in
             ('hooks', 'apps', 'plugins', 'skill_search', 'memories'))
             or skills.get('include_instructions') is not False):
         raise Attention('managed runs require hooks, apps, plugins, skill_search and '
                         'automatic skill instructions and memories disabled')
     servers = config.get('mcp_servers', {})
+    if not isinstance(servers, dict):
+        raise Attention('MCP server configuration must be a mapping')
     expected = {}
     for name, server in servers.items():
+        if not isinstance(server, dict):
+            raise Attention('each MCP server entry must be a mapping')
         if server.get('enabled', True) is False:
             continue
         tools = server.get('enabled_tools')
@@ -319,7 +341,7 @@ def latest_turn(client, session_id, deadline):
 def configured_client(profile, overrides, expected, deadline, local=None, config=None):
     client = Rpc(profile, overrides, local_child_env(local, config) if local is not None else None)
     try:
-        client.request('initialize', {'clientInfo': {'name': 'agent-sessions', 'version': storage.VERSION},
+        client.request('initialize', {'clientInfo': {'name': 'agent-sessions', 'version': paths.VERSION},
                                       'capabilities': {'experimentalApi': True}}, deadline)
         client.send({'method': 'initialized', 'params': {}}, deadline)
         effective = client.request('config/read', {'cwd': profile['cwd'],
@@ -427,11 +449,15 @@ def record_mcp_call(item, receipt, expected):
     calls.append(value)
 
 
+def _same_cwd(value, expected):
+    return isinstance(value, str) and bool(value) and str(Path(value).resolve()) == expected
+
+
 def execute(pair, receipt, persist, timeout, filename, no_mcp, profile, local, complete=False, archive=False, metrics=False):
     previous = pair.get('last_run', {})
     if profile['host'] != 'codex' or pair['partner']['host'] != 'codex':
         raise Attention('managed runs require a Codex profile and partner')
-    if profile['cwd'] != pair['partner']['cwd']:
+    if not _same_cwd(pair['partner']['cwd'], profile['cwd']):
         raise Attention('partner directory differs from profile')
     prompt, receipt['prompt_sha256'] = prompt_text(pair, filename)
     overrides = profiles.codex_overrides(profile)
@@ -455,8 +481,8 @@ def execute(pair, receipt, persist, timeout, filename, no_mcp, profile, local, c
     client, owned_turn = None, None
 
     def guard():
-        profiles.guard(storage.data_dir(), receipt['session_id'], profile['cwd'], 'codex',
-                       profile['id'], storage.write_json, expected=profile['id'])
+        profiles.guard(paths.data_dir(), receipt['session_id'], profile['cwd'], 'codex',
+                       profile['id'], paths.write_json, expected=profile['id'])
 
     try:
         client = configured_client(profile, overrides, expected, deadline, local, config)
@@ -493,7 +519,7 @@ def execute(pair, receipt, persist, timeout, filename, no_mcp, profile, local, c
         persist('loading', 'unknown')
         thread = client.request(method, {**params, 'cwd': profile['cwd'], 'config': config, **({'model':local['model']} if local else {})},
                                 deadline)['thread']
-        native_id = storage.validate_session_id(thread['id'])
+        native_id = paths.validate_session_id(thread['id'])
         if session_id and native_id != session_id:
             receipt['observed_session_id'] = native_id
             raise Attention('native resume returned a different identity')
@@ -501,7 +527,7 @@ def execute(pair, receipt, persist, timeout, filename, no_mcp, profile, local, c
         persist('loading', 'unknown')
         if local is not None:
             check_thread_provider(thread, local)
-        if str(Path(thread['cwd']).resolve()) != profile['cwd']:
+        if not _same_cwd(thread.get('cwd'), profile['cwd']):
             raise Attention('native thread directory differs from profile')
         if thread.get('sessionId', native_id) != native_id:
             raise Attention('managed worker must be a persistent root session')
@@ -519,7 +545,7 @@ def execute(pair, receipt, persist, timeout, filename, no_mcp, profile, local, c
             # Read live metadata before history so a completed intervening turn is visible.
             metadata = client.request('thread/read', {'threadId': native_id,
                                        'includeTurns': False}, deadline)['thread']
-            if (metadata.get('id') != native_id or metadata.get('cwd') != profile['cwd']
+            if (metadata.get('id') != native_id or not _same_cwd(metadata.get('cwd'), profile['cwd'])
                     or metadata.get('status', {}).get('type') != 'idle'
                     or metadata.get('turns', []) != []):
                 raise Attention('fresh native thread changed before assignment')
@@ -552,7 +578,7 @@ def execute(pair, receipt, persist, timeout, filename, no_mcp, profile, local, c
                             **({'model': local['model']} if local else {})}, deadline)['thread']
                         if local is not None:
                             check_thread_provider(loaded, local)
-                        if (loaded.get('id') != native_id or loaded.get('cwd') != profile['cwd']
+                        if (loaded.get('id') != native_id or not _same_cwd(loaded.get('cwd'), profile['cwd'])
                                 or loaded.get('sessionId', native_id) != native_id
                                 or loaded.get('status', {}).get('type') != 'idle'):
                             raise Attention('reloaded native root identity or state changed')
@@ -560,7 +586,7 @@ def execute(pair, receipt, persist, timeout, filename, no_mcp, profile, local, c
                         guard()
                         metadata = client.request('thread/read', {'threadId': native_id,
                             'includeTurns': False}, deadline)['thread']
-                        if (metadata.get('id') != native_id or metadata.get('cwd') != profile['cwd']
+                        if (metadata.get('id') != native_id or not _same_cwd(metadata.get('cwd'), profile['cwd'])
                                 or metadata.get('status', {}).get('type') != 'idle'
                                 or metadata.get('turns', []) != []):
                             raise Attention('reloaded native root changed before assignment')
@@ -574,7 +600,7 @@ def execute(pair, receipt, persist, timeout, filename, no_mcp, profile, local, c
                     history_absent = True
                 else:
                     raise
-            if (current.get('id') != native_id or current.get('cwd') != profile['cwd']
+            if (current.get('id') != native_id or not _same_cwd(current.get('cwd'), profile['cwd'])
                     or current.get('status', {}).get('type') != 'idle'
                     or not history_absent and current.get('turns') != []):
                 raise Attention('fresh native thread changed before assignment')
@@ -590,30 +616,49 @@ def execute(pair, receipt, persist, timeout, filename, no_mcp, profile, local, c
         turn = client.request('turn/start', {'threadId': native_id,
                               'input': [{'type': 'text', 'text': prompt}],
                               **({'model':local['model'], 'summary':'none'} if local else {})}, deadline)['turn']
-        owned_turn = storage.validate_session_id(turn['id'])
+        owned_turn = paths.validate_session_id(turn['id'])
         receipt['turn_id'] = owned_turn
         persist('running', 'unknown')
         output = []
         while True:
             event = client.events.popleft() if client.events else client.next(deadline)
-            params = event.get('params', {})
-            if params.get('threadId') != native_id:
+            params = event.get('params')
+            if not isinstance(params, dict) or params.get('threadId') != native_id:
                 continue
             if event.get('method') == 'item/completed' and params.get('turnId') == owned_turn:
-                item = params['item']
-                record_mcp_call(item,receipt,expected)
-                if item.get('type')=='mcpToolCall':
-                    persist('running','unknown')
+                item = params.get('item')
+                if not isinstance(item, dict):
+                    raise TypeError('invalid native item payload')
+                record_mcp_call(item, receipt, expected)
+                if item.get('type') == 'mcpToolCall':
+                    persist('running', 'unknown')
                 if item.get('type') == 'agentMessage':
-                    output.append(item.get('text', ''))
-            if event.get('method') == 'turn/completed' and params['turn']['id'] == owned_turn:
-                ended = params['turn']
-                for item in ended.get('items',[]):
-                    record_mcp_call(item,receipt,expected)
+                    text = item.get('text', '')
+                    if not isinstance(text, str):
+                        raise TypeError('invalid native agentMessage text')
+                    output.append(text)
+            if event.get('method') == 'turn/completed':
+                ended = params.get('turn')
+                if not isinstance(ended, dict):
+                    raise TypeError('invalid native turn completion payload')
+                if ended.get('id') != owned_turn:
+                    continue
+                items = ended.get('items', [])
+                if not isinstance(items, list) or any(not isinstance(i, dict) for i in items):
+                    raise TypeError('invalid native turn items payload')
+                for item in items:
+                    record_mcp_call(item, receipt, expected)
                 if not output:
-                    output = [i.get('text', '') for i in ended.get('items', [])
-                              if i.get('type') == 'agentMessage']
-                receipt['output_text'] = '\n'.join(output).encode()[:TEXT_LIMIT].decode('utf-8', 'ignore')
+                    for item in items:
+                        if item.get('type') == 'agentMessage':
+                            text = item.get('text', '')
+                            if not isinstance(text, str):
+                                raise TypeError('invalid native agentMessage text')
+                            output.append(text)
+                joined = '\n'.join(output).encode('utf-8')
+                if len(joined) > TEXT_LIMIT:
+                    raise Attention('worker output exceeds 64 KiB')
+                receipt['output_text'] = joined.decode('utf-8')
                 guard()
                 if metrics:
                     observed = client.metrics.result(owned_turn)
@@ -623,7 +668,7 @@ def execute(pair, receipt, persist, timeout, filename, no_mcp, profile, local, c
                 owned_turn = None
                 if complete and receipt['status'] == 'completed':
                     state = 'archive_failed' if archive else 'closed'
-                    storage.record_pair_completion(pair, storage.environment_session_id(), state)
+                    partners.record_pair_completion(pair, paths.environment_session_id(), state)
                     receipt['completion'] = {'status': 'archive_failed' if archive else 'completed',
                                              'native_state': state}
                     if archive:
@@ -631,7 +676,7 @@ def execute(pair, receipt, persist, timeout, filename, no_mcp, profile, local, c
                 persist('finished', receipt['status'])
                 if complete and archive and receipt['status'] == 'completed':
                     try:
-                        if storage.worker_has_open_references(pair):
+                        if partners.worker_has_open_references(pair):
                             raise Attention('worker remains referenced by another open pair')
                         if client.request('thread/archive', {'threadId': native_id}, deadline) != {}:
                             raise Attention('native archive response is invalid')
@@ -664,7 +709,7 @@ def execute(pair, receipt, persist, timeout, filename, no_mcp, profile, local, c
 
 
 def _run(pair_id, timeout, prompt_file, no_mcp, use_local, complete=False, archive=False, metrics=False):
-    pair = storage.read_pair(pair_id)
+    pair = partners.read_pair(pair_id)
     previous = pair.get('last_run', {})
     receipt = {'pair_id': pair_id, 'session_id': pair['partner']['id'],
         'profile_id': pair.get('profile'), 'turn_id': None,
@@ -677,9 +722,9 @@ def _run(pair_id, timeout, prompt_file, no_mcp, use_local, complete=False, archi
             raise Attention('archive requires completion')
         if pair.get('status') == 'completed':
             raise Attention('completed pair cannot run again')
-        caller = storage.environment_session_id()
+        caller = paths.environment_session_id()
         if caller:
-            storage.validate_session_id(caller)
+            paths.validate_session_id(caller)
             if caller not in (pair['caller']['id'], pair['partner']['id']):
                 raise Attention('only a pair endpoint can run the partner')
         pending = (previous.get('status') != 'completed' and
@@ -687,8 +732,8 @@ def _run(pair_id, timeout, prompt_file, no_mcp, use_local, complete=False, archi
                     previous.get('phase') in ('submitting', 'running')))
         if previous.get('status') in ('unknown', 'failed') or pending:
             return public_receipt(previous)
-        with storage.locked(storage.pair_path(pair_id), blocking=False):
-            locked_pair = storage.read_pair(pair_id)
+        with paths.locked(paths.pair_path(pair_id), blocking=False):
+            locked_pair = partners.read_pair(pair_id)
             if locked_pair.get('status') == 'completed':
                 raise Attention('completed pair cannot run again')
             if locked_pair != pair:
@@ -700,11 +745,11 @@ def _run(pair_id, timeout, prompt_file, no_mcp, use_local, complete=False, archi
             def persist(phase, status):
                 receipt.update(phase=phase, status=status)
                 pair['last_run'] = dict(receipt)
-                storage.write_json(storage.pair_path(pair_id), pair)
+                paths.write_json(paths.pair_path(pair_id), pair)
 
             preflight_done = False
             try:
-                profile = profiles.load(storage.data_dir(), pair['profile'])
+                profile = profiles.load(paths.data_dir(), pair['profile'])
                 local = local_provider(profile) if use_local else None
                 if receipt['session_id'] and previous.get('local_provider') != local:
                     raise Attention('saved local provider mode or configuration changed')
@@ -721,6 +766,8 @@ def _run(pair_id, timeout, prompt_file, no_mcp, use_local, complete=False, archi
 
 
 def run(pair_id, timeout=60, prompt_file=None, no_mcp=False, local_provider=False, complete=False, archive=False, metrics=False):
+    if threading.current_thread() is not threading.main_thread():
+        return _run(pair_id, timeout, prompt_file, no_mcp, local_provider, complete, archive, metrics)
     previous = {signum: signal.getsignal(signum) for signum in (signal.SIGTERM, signal.SIGINT)}
     interrupted = False
 

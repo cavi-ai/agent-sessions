@@ -4,7 +4,7 @@
 
 - Python 3.9 or newer and Git.
 - macOS or Linux. Windows is not supported because queue storage uses POSIX locks.
-- Codex, Claude Code or Antigravity (`agy`) installed separately for the sessions you want to use.
+- Codex, Claude Code, Antigravity (`agy`), or OpenCode installed separately for the sessions you want to use.
 
 Python 3.9 and 3.10 also need `tomli`; package installation resolves it automatically.
 The CLI does not install the hosts or sign in to their accounts.
@@ -20,8 +20,8 @@ agent-sessions --help
 
 The tag above is filled in when documentation is generated for a release. A tag
 for an unpublished checkout may not exist yet. Use the editable checkout below
-for its features. The earlier `v0.2.0` release does not include Antigravity or
-managed local providers. The tagged release does not require a PyPI release.
+for its features. The earlier `v0.3.0` release does not include OpenCode host
+support or the `src/agent_sessions` package layout. The tagged release does not require a PyPI release.
 
 ## Install in a virtual environment
 
@@ -66,7 +66,7 @@ python3 -m venv .venv
 python -m pip install -e '.[dev]'
 ```
 
-You can also run `python3 agent_sessions.py` from the checkout once its dependencies
+You can also run `PYTHONPATH=src python3 -m agent_sessions` from the checkout once its dependencies
 are installed. If you need a checkout, clone `https://github.com/cavi-ai/agent-sessions.git`
 and select the desired revision before installing. See [Contributing](https://github.com/cavi-ai/agent-sessions/blob/main/CONTRIBUTING.md)
 for development checks.
@@ -92,8 +92,9 @@ agent-sessions configure codex --remove
 agent-sessions configure claude --remove
 ```
 
-For installations with Antigravity hooks, also run
-`agent-sessions configure agy --remove` before uninstalling. Then remove the CLI:
+For installations with Antigravity or OpenCode hooks, also run
+`agent-sessions configure agy --remove` and `agent-sessions configure opencode --remove`
+before uninstalling. Then remove the CLI:
 
 ```sh
 uv tool uninstall agent-sessions

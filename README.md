@@ -49,7 +49,7 @@ See [the full results and worker profiles](docs/agent-sessions/source/pages/guid
 Requires Python 3.9+, Git, and macOS or Linux.
 
 ```sh
-uv tool install git+https://github.com/cavi-ai/agent-sessions.git@v0.3.0
+uv tool install git+https://github.com/cavi-ai/agent-sessions.git@v0.4.0
 ```
 
 To work from an editable checkout, run:
@@ -95,7 +95,7 @@ and queues where your workflow needs them.
 | Native sessions | Codex, Claude Code, Antigravity (`agy`), and OpenCode discovery, messaging and partner records |
 | Profiled workers | Pinned configuration with guarded launch and resume for all four hosts |
 | Managed turns | Codex App Server execution, scope checks and saved run receipts |
-| Supervising harnesses | CLI contracts and `resource_client.ResourceClient` for resource admission, lifecycle events and checkpoint/resume |
+| Supervising harnesses | CLI contracts and `agent_sessions.resource_client.ResourceClient` for resource admission, lifecycle events and checkpoint/resume |
 
 Optional [host hooks](docs/agent-sessions/source/pages/guides/hooks.md) deliver
 queued messages at supported checkpoints. Managed turns check configuration
