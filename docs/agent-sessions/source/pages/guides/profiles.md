@@ -248,8 +248,13 @@ configurations.
 
 All three hosts use their configured model and native permission settings.
 Claude launches repeat the settings and MCP file paths with
-`--strict-mcp-config`. Codex repeats pinned app, feature, MCP, plugin and skill
-settings as native `-c` overrides. Antigravity launches pass `--settings` for
+`--strict-mcp-config`. Codex repeats the pinned `model`,
+`model_reasoning_effort`, app, feature, MCP, plugin and skill settings as native
+`-c` overrides, so they apply even when Codex does not load the worker
+directory's `.codex/config.toml`. When the profile pins both `model` and
+`model_provider`, Codex also receives the provider ID and its definition if the
+profile defines it. A provider defined only in native user config must be
+available to Codex at launch. Antigravity launches pass `--settings` for
 `.agents/settings.json`, `--agent` when a custom agent file is pinned,
 `--disable-slash-commands` when `disableSlashCommands: true` is set, and
 `--conversation` on resume; `.agents/settings.json` must not define `hooks`.
@@ -261,6 +266,10 @@ them.
 Capability overrides are visible in process arguments and dry-run output. Keep
 secrets out of capability settings, URLs and command arguments. Codex capability
 overrides reject nonempty MCP `env`, `http_headers` and `bearer_token` values.
+For model providers pinned in the worker profile, use `env_key` or
+`env_http_headers` for credentials. Define providers that need inline headers,
+query parameters or other auth configuration in native user config and pin only
+their provider ID and model in the worker profile.
 Use native references:
 
 - `env_vars` for environment variables forwarded to a stdio server.
