@@ -220,7 +220,8 @@ def prompt_text(pair, filename):
                 raise Attention('prompt file must be regular')
             raw = stream.read(TEXT_LIMIT + 1)
             after = os.fstat(stream.fileno())
-        signature = lambda s: (s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns)
+        def signature(s):
+            return (s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns)
         if (signature(before) != signature(after) or signature(after) != signature(path.stat())
                 or path.resolve(strict=True) != path):
             raise Attention('prompt file changed while reading')
@@ -430,7 +431,8 @@ def record_mcp_call(item, receipt, expected):
             or item.get('status') not in ('completed','failed')
             or item['tool'] not in expected.get(item['server'],[])):
         raise Attention('host MCP call differs from the pinned scope')
-    encode=lambda value:json.dumps(value,sort_keys=True,separators=(',',':'),allow_nan=False).encode()
+    def encode(value):
+        return json.dumps(value, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()
     result=item.get('result') or {}
     if not isinstance(result,dict):
         raise Attention('invalid host MCP result')

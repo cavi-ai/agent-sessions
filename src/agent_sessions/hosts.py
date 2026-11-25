@@ -134,6 +134,8 @@ def codex_sessions(since, include_reviews=False, within=None):
         return []
     found = []
     for thread, rollout, updated_ms, cwd, title, source, nickname in rows:
+        if not isinstance(thread, str) or not paths.SESSION_ID_RE.fullmatch(thread):
+            continue
         if not isinstance(cwd, str) or not cwd:
             continue
         if within and not paths.inside(paths.resolved(cwd), within):
@@ -174,6 +176,8 @@ def codex_sessions(since, include_reviews=False, within=None):
 def claude_sessions(since, within=None):
     found = []
     for path in (paths.claude_home() / "projects").glob("*/*.jsonl"):
+        if not paths.SESSION_ID_RE.fullmatch(path.stem):
+            continue
         try:
             mtime = path.stat().st_mtime
         except OSError:
@@ -700,8 +704,9 @@ def describe(session, full_id=False, current_id=None):
 
 
 def self_id(cwd, found):
-    if paths.environment_session_id():
-        return paths.validate_session_id(paths.environment_session_id())
+    env_id = paths.environment_session_id()
+    if env_id:
+        return paths.validate_session_id(env_id)
     here = [s for s in found if paths.resolved(s["cwd"]) == paths.resolved(cwd)]
     if len(here) == 1:
         return here[0]["id"]

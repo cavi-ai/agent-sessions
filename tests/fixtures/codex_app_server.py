@@ -53,14 +53,22 @@ for line in sys.stdin:
             effective['model_providers'][effective['model_provider']].update(model_catalog_url=None, experimental_bearer_token=None, auth=None, http_headers=None, supports_standalone_web_search=False)
         if state.get('local_drift'):
             drift = state['local_drift']
-            if drift == 'origin': effective['model_providers'][effective['model_provider']]['base_url'] = 'http://127.0.0.1:1/v1'
-            elif drift == 'auth_extra': effective['model_providers'][effective['model_provider']]['experimental_bearer_token'] = 'unexpected'
-            elif drift == 'stream_retries': effective['model_providers'][effective['model_provider']]['stream_max_retries'] = 3
-            elif drift == 'summary': effective['model_reasoning_summary'] = 'auto'
-            elif drift == 'web_search': effective['web_search'] = 'live'
-            elif drift == 'auth_store': effective['cli_auth_credentials_store'] = 'file'
-            elif drift == 'model': effective['model'] = 'different'
-            elif drift == 'provider': effective['model_provider'] = 'different'
+            if drift == 'origin':
+                effective['model_providers'][effective['model_provider']]['base_url'] = 'http://127.0.0.1:1/v1'
+            elif drift == 'auth_extra':
+                effective['model_providers'][effective['model_provider']]['experimental_bearer_token'] = 'unexpected'
+            elif drift == 'stream_retries':
+                effective['model_providers'][effective['model_provider']]['stream_max_retries'] = 3
+            elif drift == 'summary':
+                effective['model_reasoning_summary'] = 'auto'
+            elif drift == 'web_search':
+                effective['web_search'] = 'live'
+            elif drift == 'auth_store':
+                effective['cli_auth_credentials_store'] = 'file'
+            elif drift == 'model':
+                effective['model'] = 'different'
+            elif drift == 'provider':
+                effective['model_provider'] = 'different'
         result = {'config': effective}
     elif method == 'thread/turns/list':
         if state.get('unsupported_initial_history') and state.get('clients') == 1:

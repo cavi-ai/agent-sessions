@@ -21,6 +21,8 @@ from contextlib import closing, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
+from . import paths
+
 NAME = re.compile(r'[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}')
 DIGEST = re.compile(r'[0-9a-f]{64}')
 TERMINAL = ('completed', 'failed', 'cancelled', 'expired')
@@ -78,8 +80,7 @@ def current_actor(session=None, *, pid=None):
     birth = process_identity(pid)
     if birth is None:
         raise ValueError('The resource owner process has exited')
-    owner = (session or os.environ.get('CODEX_THREAD_ID') or os.environ.get('CLAUDE_CODE_SESSION_ID')
-             or os.environ.get('ANTIGRAVITY_CONVERSATION_ID') or os.environ.get('OPENCODE_SESSION_ID'))
+    owner = session or paths.environment_session_id()
     return {'id': owner or 'process-'+hashlib.sha256((str(pid)+birth).encode()).hexdigest(),
             'pid': pid, 'birth': birth}
 
@@ -106,6 +107,8 @@ def actor_fields(actor):
 class Broker:
     def __init__(self, directory, *, identity=process_identity, clock=time.time):
         self.root = Path(directory)
+        if self.root.is_symlink():
+            raise ValueError('Broker storage directory cannot be a symbolic link')
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.root.chmod(0o700)
         self.path = self.root / 'resources.sqlite3'
@@ -381,7 +384,10 @@ class Broker:
                 time.sleep(min(.2, remaining))
         except BaseException:
             if not keep:
-                self.cancel(ticket, actor)
+                try:
+                    self.cancel(ticket, actor)
+                except Exception:
+                    pass
             raise
 
     def events(self, actor, after=0, *, lifecycle=False):

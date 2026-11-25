@@ -160,11 +160,11 @@ def compute_content_sha256(root, relative_paths):
 
 def navigation_paths(navigation):
     if not isinstance(navigation, dict) or not isinstance(navigation.get("sections"), list):
-        raise ValueError("navigation.json missing sections array")  # noqa: TRY004
+        raise ValueError("navigation.json missing sections array")
     pages = []
     for section in navigation["sections"]:
         if not isinstance(section, dict) or not isinstance(section.get("pages"), list):
-            raise ValueError("navigation.json sections need pages arrays")  # noqa: TRY004
+            raise ValueError("navigation.json sections need pages arrays")
         for page in section["pages"]:
             path = page.get("path") if isinstance(page, dict) else None
             if (

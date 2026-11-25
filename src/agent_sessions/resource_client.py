@@ -21,10 +21,13 @@ def digest(value):
     return hashlib.sha256(encoded(value)).hexdigest()
 
 
-def read_private(path):
+def read_private_bytes(path):
     path = Path(path).absolute()
-    if path != path.resolve():
-        raise ValueError('Use a canonical checkpoint without symbolic links')
+    try:
+        if path.is_symlink() or path != path.resolve():
+            raise ValueError('Use a canonical checkpoint without symbolic links')
+    except RuntimeError as failure:
+        raise ValueError('Use a canonical checkpoint without symbolic links') from failure
     descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK | getattr(os, 'O_NOFOLLOW', 0))
     with os.fdopen(descriptor, 'rb') as stream:
         info = os.fstat(stream.fileno())
@@ -33,7 +36,11 @@ def read_private(path):
         raw = stream.read(LIMIT+1)
     if len(raw) > LIMIT:
         raise ValueError('Checkpoint exceeds 64 KiB')
-    return json.loads(raw)
+    return raw
+
+
+def read_private(path):
+    return json.loads(read_private_bytes(path))
 
 
 def write_private(path, value):
@@ -90,7 +97,7 @@ class ResourceClient:
         self.environment = environment
 
     def call(self, action, *arguments, timeout=10):
-        owner = ['--session', self.owner] if self.owner is not None else []
+        owner = [f'--session={self.owner}'] if self.owner is not None else []
         result = subprocess.run([*self.command, 'resource', *owner, action, *map(str, arguments)],
             env=self.environment, capture_output=True, text=True, timeout=timeout, check=False)
         if result.returncode:
@@ -106,31 +113,33 @@ class ResourceClient:
         protocol = self.call('protocol')
         if not {'queue-advice','resumable-tickets','payload-idempotency','lifecycle-events','one-shot-start'} <= set(protocol.get('capabilities', [])):
             raise RuntimeError('Upgrade agent-sessions for resumable resource tickets')
-        args = [resource, key, '--seconds', seconds, '--resumable', '--payload-sha256', digest(payload)]
+        args = [f'--seconds={seconds}', '--resumable', f'--payload-sha256={digest(payload)}']
         if estimate_seconds is not None:
-            args.extend(['--estimate-seconds', estimate_seconds])
+            args.append(f'--estimate-seconds={estimate_seconds}')
+        args.extend(['--', resource, key])
         return self.call('request', *args)
 
     def status(self, ticket):
-        return self.call('status', ticket)
+        return self.call('status', '--', ticket)
 
     def cancel(self, ticket):
-        return self.call('cancel', ticket)
+        return self.call('cancel', '--', ticket)
 
     def wait(self, ticket, *, seconds=60, keep=True):
-        return self.call('wait', ticket, '--seconds', seconds, *(['--keep'] if keep else []), timeout=seconds+10)
+        return self.call('wait', f'--seconds={seconds}', *(['--keep'] if keep else []), '--', ticket, timeout=seconds+10)
 
     def start(self, grant):
-        return self.call('start', grant['id'], '--lease', grant['lease'], '--fence', grant['fence'])
+        return self.call('start', f"--lease={grant['lease']}", f"--fence={grant['fence']}", '--', grant['id'])
 
     def finish(self, grant, outcome, evidence=None):
-        args = [grant['id'], '--lease', grant['lease'], '--fence', grant['fence'], '--outcome', outcome]
+        args = [f"--lease={grant['lease']}", f"--fence={grant['fence']}", f'--outcome={outcome}']
         if evidence is not None:
-            args.extend(['--evidence', evidence])
+            args.append(f'--evidence={evidence}')
+        args.extend(['--', grant['id']])
         return self.call('finish', *args)
 
     def events(self, after=0):
-        return self.call('events', '--lifecycle', '--after', after)
+        return self.call('events', '--lifecycle', f'--after={after}')
 
     @staticmethod
     def checkpoint(path, ticket, payload):

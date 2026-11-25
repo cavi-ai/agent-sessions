@@ -5,7 +5,14 @@ import json
 import os
 import subprocess
 import sys
+from pathlib import Path
 from unittest.mock import patch
+
+TESTS_DIR = Path(__file__).resolve().parent
+if str(TESTS_DIR) not in sys.path:
+    sys.path.insert(0, str(TESTS_DIR))
+if str(TESTS_DIR.parent / 'src') not in sys.path:
+    sys.path.insert(0, str(TESTS_DIR.parent / 'src'))
 
 from test_agent_sessions import TOOL_CMD, Machine
 
@@ -446,7 +453,8 @@ config = [{name = "painter", enabled = false}]
         pair = json.loads(self.run_tool('partner','codex',str(self.worktree),
             '--dangerously-skip-permissions is prompt text', '--profile',profile['id'],
             '--session','codex-main-0001'))
-        binary = self.root/'bin';binary.mkdir()
+        binary = self.root / 'bin'
+        binary.mkdir()
         fake = binary/'codex'
         fake.write_text('#!'+sys.executable+'\nimport json,os,sys\n'
             'from pathlib import Path\n'

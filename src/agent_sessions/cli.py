@@ -254,7 +254,7 @@ def _handle_hook(args):
             _agy_block(msg)
             return 0
         return 2
-    except Exception as exc:  # noqa: BLE001 - ordinary message hooks remain non-blocking
+    except Exception as exc:  # ordinary message hooks remain non-blocking
         msg = f"agent-sessions hook: {exc}"
         print(msg, file=sys.stderr)
         if profiled:
