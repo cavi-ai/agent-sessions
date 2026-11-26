@@ -166,7 +166,7 @@ class ListTests(Machine):
         self.assertEqual(payload, [])
 
     def test_cli_version_reports_release_version(self):
-        self.assertEqual(self.run_tool('--version').strip(), 'agent-sessions 0.4.0')
+        self.assertEqual(self.run_tool('--version').strip(), 'agent-sessions 0.4.1')
 
     def test_complete_retains_pair_and_hides_only_closed_worker(self):
         pair = json.loads(self.run_tool('partner', 'attach', 'codex-sub-0002',
