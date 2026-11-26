@@ -410,13 +410,25 @@ def _main(argv=None):
     )
     found = hosts.sessions(args.minutes, getattr(args, "reviews", False), host=selected_host)
     if args.command == "partner":
-        caller = args.session or hosts.self_id(os.getcwd(), found)
+        if args.partner_action == "connect":
+            caller_host, env_id = paths.environment_session()
+            caller = args.session or env_id
+            if caller is None:
+                current = hosts.session_in_directory(os.getcwd(), found)
+                caller, caller_host = current["id"], current["host"]
+            elif caller != env_id:
+                caller_host = None
+            elif caller_host is None:
+                raise ValueError("caller session is ambiguous across host environment variables")
+        else:
+            caller = args.session or hosts.self_id(os.getcwd(), found)
         paths.validate_session_id(caller)
         if args.partner_action == "attach":
             result = partners.attach_partner(args.session_id, caller, found, args.profile)
         elif args.partner_action == "connect":
             result = partners.connect_partner(
-                args.pair_id, args.session_id or caller, caller, found, args.host_id
+                args.pair_id, args.session_id or caller, caller, found, args.host_id,
+                caller_host=caller_host,
             )
         elif args.partner_action == "resume":
             pair = partners.read_pair(args.pair_id)

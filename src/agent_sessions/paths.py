@@ -85,8 +85,8 @@ def _nearer_host(present):
     return None
 
 
-def environment_session_id():
-    """This process's session; when one host runs inside another, the nearer host wins."""
+def environment_session():
+    """Return the current (host, ID), leaving the host unset for unresolved ID collisions."""
     codex = os.environ.get("CODEX_THREAD_ID")
     claude = os.environ.get("CLAUDE_CODE_SESSION_ID")
     agy = os.environ.get("ANTIGRAVITY_CONVERSATION_ID")
@@ -102,15 +102,23 @@ def environment_session_id():
         if v
     }
     if len(present) <= 1:
-        return next(iter(present.values()), None)
+        return next(iter(present.items()), (None, None))
     nearer = _nearer_host(present)
     if nearer:
-        return present[nearer]
+        return nearer, present[nearer]
     if claude and codex and claude_is_nearer():
-        return claude
+        return "claude", claude
     if agy and os.environ.get("ANTIGRAVITY_AGENT") == "1":
-        return agy
-    return codex or claude or agy or opencode
+        return "agy", agy
+    host, session_id = next(iter(present.items()))
+    if list(present.values()).count(session_id) > 1:
+        return None, session_id
+    return host, session_id
+
+
+def environment_session_id():
+    """This process's session; when one host runs inside another, the nearer host wins."""
+    return environment_session()[1]
 
 
 def claude_is_nearer():

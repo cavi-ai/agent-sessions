@@ -44,7 +44,8 @@ def _node_ts_command() -> tuple[list[str] | None, str | None]:
             None,
             f"Node.js >= 22.6 required for TypeScript execution; found {version_text}",
         )
-    flags = ["--experimental-strip-types"] if (major, minor) < (22, 18) else []
+    needs_strip_types = (major == 22 and minor < 18) or (major == 23 and minor < 6)
+    flags = ["--experimental-strip-types"] if needs_strip_types else []
     return [node, *flags], None
 
 

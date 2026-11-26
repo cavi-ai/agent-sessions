@@ -482,16 +482,28 @@ def claim_invitation(pair):
             )
 
 
-def connect_partner(pair_id, session_id, caller_id, found, host_id=None):
+def connect_partner(pair_id, session_id, caller_id, found, host_id=None, *, caller_host=None):
     """Connect a pair to a discovered session, validating host and working directory."""
     paths.validate_session_id(session_id)
     with paths.locked(paths.pair_path(pair_id)):
         pair = read_pair(pair_id)
-        if caller_id not in (pair["caller"]["id"], session_id):
+        initiator = pair["caller"]
+        expected = pair["partner"]
+        if caller_id not in (initiator["id"], session_id):
             raise ValueError("only a pair endpoint can record the connection")
-        if session_id == pair["caller"]["id"]:
+        if session_id == initiator["id"]:
             raise ValueError("a session cannot be its own partner")
-        if host_id and (pair["partner"]["host"] != "codex" or host_id != "local"):
+        if caller_host is None:
+            callers = [s for s in found if s["id"] == caller_id]
+            if len(callers) > 1:
+                raise ValueError(_ambiguity_error("caller", caller_id, callers))
+            if callers:
+                caller_host = callers[0]["host"]
+        if caller_id == session_id and caller_host != expected["host"]:
+            raise ValueError("self-connect requires a caller on the requested partner host")
+        if caller_id == initiator["id"] and caller_host not in (None, initiator["host"]):
+            raise ValueError("caller must be on the initiating session's host")
+        if host_id and (expected["host"] != "codex" or host_id != "local"):
             raise ValueError("only local Codex partners support --host-id local")
         if pair["status"] == "completed":
             raise ValueError("completed pair cannot be reconnected")
@@ -505,7 +517,6 @@ def connect_partner(pair_id, session_id, caller_id, found, host_id=None):
                 paths.write_json(paths.pair_path(pair_id), pair)
             claim_invitation(pair)
             return pair
-        expected = pair["partner"]
         matches_peer = [
             s for s in found if s["id"] == session_id and s["host"] == expected["host"]
         ]

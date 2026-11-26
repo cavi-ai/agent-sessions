@@ -707,7 +707,11 @@ def self_id(cwd, found):
     env_id = paths.environment_session_id()
     if env_id:
         return paths.validate_session_id(env_id)
+    return session_in_directory(cwd, found)["id"]
+
+
+def session_in_directory(cwd, found):
     here = [s for s in found if paths.resolved(s["cwd"]) == paths.resolved(cwd)]
     if len(here) == 1:
-        return here[0]["id"]
+        return here[0]
     raise SystemExit(f"agent-sessions: {len(here)} sessions work in {cwd}; pass --session")

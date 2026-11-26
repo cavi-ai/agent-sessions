@@ -99,7 +99,7 @@ class PartnersHardeningTests(unittest.TestCase):
             _session("codex", "codex-caller-01", self.caller_dir),
         ]
         connected = partners.connect_partner(
-            pair["id"], "shared-partner-01", "shared-partner-01", found
+            pair["id"], "shared-partner-01", "codex-caller-01", found
         )
         self.assertEqual(connected["status"], "connected")
         self.assertEqual(connected["partner"]["host"], "claude")
@@ -190,7 +190,7 @@ class PartnersHardeningTests(unittest.TestCase):
                 self.assertEqual(persisted["status"], "needs_creation")
                 self.assertIsNone(persisted["partner"]["id"])
 
-    def test_connect_partner_cli_handles_real_cross_host_id_collision(self):
+    def test_connect_partner_cli_checks_self_connect_host_on_cross_host_id_collision(self):
         codex_home = self.root / "codex-home"
         claude_home = self.root / "claude-home"
         codex_home.mkdir()
@@ -270,19 +270,33 @@ class PartnersHardeningTests(unittest.TestCase):
         )
         pair = json.loads(created.stdout)
         self.assertEqual(pair["status"], "waiting")
+        invite_dir = paths.queue_dir(paths.path_key(str(self.partner_dir)))
+        self.assertEqual(len(queue.listing(invite_dir)), 1)
+
+        command = [*TOOL_CMD, "--json", "partner", "connect", pair["id"]]
+        for label, options, caller_env, cwd, error in (
+            ("wrong host", [], {"CODEX_THREAD_ID": shared_id}, self.other_dir, "host"),
+            ("unqualified ID", ["--session", shared_id], {}, self.root, "ambiguous"),
+        ):
+            with self.subTest(caller=label):
+                denied = subprocess.run(
+                    [*command, *options],
+                    env={**env, **caller_env},
+                    cwd=cwd,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                    timeout=30,
+                )
+                self.assertNotEqual(denied.returncode, 0, denied.stdout)
+                self.assertIn(error, denied.stderr)
+                self.assertEqual(partners.read_pair(pair["id"]), pair)
+                self.assertEqual(len(queue.listing(invite_dir)), 1)
 
         connected_proc = subprocess.run(
-            [
-                *TOOL_CMD,
-                "--json",
-                "partner",
-                "connect",
-                pair["id"],
-                shared_id,
-                "--session",
-                caller_id,
-            ],
-            env=env,
+            command,
+            env={**env, "CLAUDE_CODE_SESSION_ID": shared_id},
+            cwd=self.partner_dir,
             text=True,
             capture_output=True,
             check=False,
@@ -293,7 +307,6 @@ class PartnersHardeningTests(unittest.TestCase):
         self.assertEqual(connected["status"], "connected")
         self.assertEqual(connected["partner"]["host"], "claude")
         self.assertEqual(connected["partner"]["id"], shared_id)
-        invite_dir = paths.queue_dir(paths.path_key(str(self.partner_dir)))
         self.assertEqual(queue.listing(invite_dir), [])
 
     def test_create_partner_rejects_ambiguous_caller_without_writing_pair_file(self):
