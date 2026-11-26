@@ -23,10 +23,10 @@ from agent_sessions import profiles as session_profiles
 class ProfileTests(Machine):
     def test_inline_mcp_credentials_are_rejected_without_echoing_their_values(self):
         _, config = self.profile()
-        secret = 'synthetic-private-value-for-test'
-        for setting in ('env = { API_KEY = "'+secret+'" }',
-                        'http_headers = { Authorization = "'+secret+'" }',
-                        'bearer_token = "'+secret+'"'):
+        fixture_marker = 'synthetic-private-value-for-test'
+        for setting in ('env = { FIXTURE_ENV = "'+fixture_marker+'" }',
+                        'http_headers = { Authorization = "'+fixture_marker+'" }',
+                        'bearer_token = "'+fixture_marker+'"'):
             with self.subTest(setting=setting.split('=')[0]):
                 config.write_text('[mcp_servers.fixture]\ncommand = "fixture"\n'+setting+'\n')
                 profile = json.loads(self.run_tool('profile', 'create', 'codex',
@@ -36,7 +36,7 @@ class ProfileTests(Machine):
                                         capture_output=True, check=False, timeout=30)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertEqual(result.stdout, '')
-                self.assertNotIn(secret, result.stderr)
+                self.assertNotIn(fixture_marker, result.stderr)
                 self.assertIn('environment', result.stderr.lower())
 
     def test_mcp_environment_references_preserve_names_without_expanding_secrets(self):
@@ -47,11 +47,11 @@ class ProfileTests(Machine):
                           'env_http_headers = { "X-Auth" = "TEST_NATIVE_TOKEN" }\n')
         profile = json.loads(self.run_tool('profile', 'create', 'codex',
                                            str(self.worktree), 'environment'))
-        secret = 'synthetic-private-value-for-test'
+        fixture_marker = 'synthetic-private-value-for-test'
         output = self.run_tool('profile', 'launch', profile['id'], '--dry-run',
-                               env={**self.env, 'TEST_NATIVE_TOKEN': secret})
+                               env={**self.env, 'TEST_NATIVE_TOKEN': fixture_marker})
         self.assertIn('TEST_NATIVE_TOKEN', output)
-        self.assertNotIn(secret, output)
+        self.assertNotIn(fixture_marker, output)
 
     def test_pinned_model_provider_credentials_are_not_exposed_by_launch(self):
         _, config = self.profile()
