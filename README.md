@@ -49,7 +49,7 @@ See [the full results and worker profiles](docs/agent-sessions/source/pages/guid
 Requires Python 3.9+, Git, and macOS or Linux.
 
 ```sh
-uv tool install git+https://github.com/cavi-ai/agent-sessions.git@v0.4.0
+uv tool install git+https://github.com/cavi-ai/agent-sessions.git@v0.4.1
 ```
 
 To work from an editable checkout, run:

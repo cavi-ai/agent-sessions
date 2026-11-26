@@ -15,7 +15,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-VERSION = "0.4.0"
+VERSION = "0.4.1"
 ACTIVE_MINUTES = 30
 TAIL_BYTES = 2_000_000
 GIT_TIMEOUT = 5
