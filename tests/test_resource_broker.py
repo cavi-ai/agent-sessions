@@ -4,11 +4,14 @@ import concurrent.futures
 import hashlib
 import json
 import os
+import sqlite3
+import stat
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT / 'src') not in sys.path:
@@ -114,6 +117,88 @@ class ResourceBrokerTests(unittest.TestCase):
         state = self.broker.finish(a['id'], self.actors[0], running['lease'], running['fence'],
                                    'unresolved', None)
         self.assertEqual(state['state'], 'unresolved')
+
+    def test_current_actor_prefers_nearer_host_session_over_codex(self):
+        clean_env = {k: v for k, v in os.environ.items() if k not in (
+            'CODEX_THREAD_ID', 'CLAUDE_CODE_SESSION_ID', 'CLAUDE_PID',
+            'ANTIGRAVITY_CONVERSATION_ID', 'ANTIGRAVITY_AGENT', 'OPENCODE_SESSION_ID',
+        )}
+        nested_env = {
+            **clean_env,
+            'CODEX_THREAD_ID': 'codex-outer-session',
+            'CLAUDE_CODE_SESSION_ID': 'claude-inner-session',
+            'CLAUDE_PID': str(os.getppid()),
+        }
+        with mock.patch.dict(os.environ, nested_env, clear=True):
+            actor = current_actor(pid=os.getpid())
+            self.assertEqual(actor['id'], 'claude-inner-session')
+            explicit = current_actor('explicit-owner', pid=os.getpid())
+            self.assertEqual(explicit['id'], 'explicit-owner')
+        with mock.patch.dict(os.environ, clean_env, clear=True):
+            fallback = current_actor(pid=os.getpid())
+            self.assertTrue(fallback['id'].startswith('process-'))
+
+    def test_broker_rejects_symlinked_and_broken_storage_directory(self):
+        target = self.root / 'real-target'
+        target.mkdir(mode=0o755)
+        target.chmod(0o755)
+        symlink_root = self.root / 'broker-link'
+        symlink_root.symlink_to(target, target_is_directory=True)
+        with self.assertRaisesRegex(ValueError, 'symbolic link'):
+            Broker(symlink_root)
+        self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o755)
+        self.assertFalse((target / 'resources.sqlite3').exists())
+        missing = self.root / 'missing-target'
+        broken_link = self.root / 'broken-link'
+        broken_link.symlink_to(missing)
+        with self.assertRaisesRegex(ValueError, 'symbolic link'):
+            Broker(broken_link)
+        self.assertFalse(missing.exists())
+
+    def test_wait_propagates_base_exception_when_cancel_fails_and_respects_keep(self):
+        a = self.request(0)
+        self.start(a, self.actors[0])
+
+        # keep=False: best-effort cancel runs and original KeyboardInterrupt propagates
+        b = self.request(1, key='job-interrupt-cancel')
+        interrupt = KeyboardInterrupt('stop waiting')
+        with mock.patch('agent_sessions.resource_broker.time.sleep', side_effect=interrupt):
+            with self.assertRaises(KeyboardInterrupt) as ctx:
+                self.broker.wait(b['id'], self.actors[1], 10, keep=False)
+        self.assertIs(ctx.exception, interrupt)
+        self.assertEqual(self.broker.snapshot(b['id'], self.actors[1])['state'], 'cancelled')
+
+        # keep=False: real cancel() ValueError must not mask KeyboardInterrupt
+        c = self.request(1, key='job-interrupt-valueerror')
+        interrupt_val = KeyboardInterrupt('stop with dead actor')
+        def fail_after_owner_exits(_delay):
+            self.births.pop(2)
+            raise interrupt_val
+        with mock.patch('agent_sessions.resource_broker.time.sleep', side_effect=fail_after_owner_exits):
+            with self.assertRaises(KeyboardInterrupt) as ctx:
+                self.broker.wait(c['id'], self.actors[1], 10, keep=False)
+        self.assertIs(ctx.exception, interrupt_val)
+        self.births[2] = 'second'
+        self.assertEqual(self.broker.snapshot(c['id'], self.actors[1])['state'], 'queued')
+
+        # keep=False: sqlite3.OperationalError during cancel() must not mask KeyboardInterrupt
+        interrupt_db = KeyboardInterrupt('stop with db error')
+        with mock.patch('agent_sessions.resource_broker.time.sleep', side_effect=interrupt_db), \
+             mock.patch.object(self.broker, 'cancel', side_effect=sqlite3.OperationalError('disk I/O error')) as cancel_mock:
+            with self.assertRaises(KeyboardInterrupt) as ctx:
+                self.broker.wait(c['id'], self.actors[1], 10, keep=False)
+        self.assertIs(ctx.exception, interrupt_db)
+        cancel_mock.assert_called_once_with(c['id'], self.actors[1])
+
+        # keep=True: cancel() is not called on exception and ticket stays queued
+        interrupt_keep = KeyboardInterrupt('stop but keep')
+        with mock.patch('agent_sessions.resource_broker.time.sleep', side_effect=interrupt_keep), \
+             mock.patch.object(self.broker, 'cancel', wraps=self.broker.cancel) as keep_cancel_mock:
+            with self.assertRaises(KeyboardInterrupt) as ctx:
+                self.broker.wait(c['id'], self.actors[1], 10, keep=True)
+        self.assertIs(ctx.exception, interrupt_keep)
+        keep_cancel_mock.assert_not_called()
+        self.assertEqual(self.broker.snapshot(c['id'], self.actors[1])['state'], 'queued')
 
 
 class BrokerProcessTests(unittest.TestCase):

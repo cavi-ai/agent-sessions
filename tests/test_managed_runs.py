@@ -8,7 +8,14 @@ import subprocess
 import sys
 import time
 import unittest
+from pathlib import Path
 from unittest.mock import patch
+
+TESTS_DIR = Path(__file__).resolve().parent
+if str(TESTS_DIR) not in sys.path:
+    sys.path.insert(0, str(TESTS_DIR))
+if str(TESTS_DIR.parent / 'src') not in sys.path:
+    sys.path.insert(0, str(TESTS_DIR.parent / 'src'))
 
 from test_agent_sessions import ROOT, TOOL_CMD, Machine
 
@@ -132,7 +139,8 @@ enabled_tools = ["inspect"]
         for r in requests:
             if r['method'] in ('thread/start','turn/start'):
                 self.assertEqual(r['params']['model'], 'local-model')
-                if r['method'] == 'turn/start': self.assertEqual(r['params']['summary'], 'none')
+                if r['method'] == 'turn/start':
+                    self.assertEqual(r['params']['summary'], 'none')
                 if r['method'] == 'thread/start':
                     self.assertEqual(r['params']['config']['model_reasoning_summary'], 'none')
                     self.assertEqual(r['params']['config']['web_search'], 'disabled')
@@ -734,7 +742,10 @@ enabled_tools = ["inspect"]
         self.native(mcp_items=[event,event])
         result=self.run_pair()
         self.assertEqual(result['status'],'completed')
-        encode=lambda value:json.dumps(value,sort_keys=True,separators=(',',':'),allow_nan=False).encode()
+        def encode(value):
+            return json.dumps(
+                value, sort_keys=True, separators=(',', ':'), allow_nan=False
+            ).encode()
         self.assertEqual(result['tool_calls'],[{'id':'call-1','server':'fixture','tool':'inspect',
             'status':'completed','arguments_sha256':hashlib.sha256(encode(args)).hexdigest(),
             'result_sha256':hashlib.sha256(encode(value)).hexdigest()}])

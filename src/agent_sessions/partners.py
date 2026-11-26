@@ -207,14 +207,27 @@ def complete_partner(pair_id, completed_by=None, stop=False):
         return pair
 
 
+def _ambiguity_error(role, session_id, matches):
+    matched_hosts = sorted({s["host"] for s in matches})
+    if len(matched_hosts) > 1:
+        return (
+            f"{role} session {session_id} is ambiguous across multiple hosts: "
+            f"{', '.join(matched_hosts)}"
+        )
+    return f"{role} session {session_id} is ambiguous within host {matched_hosts[0]}"
+
+
 def create_partner(host, directory, brief, caller_id, found, project_id=None, profile_id=None):
     """Persist a native Codex creation request or a Claude/Antigravity/OpenCode path invitation."""
     host = profiles.normalize_host(host)
     if host not in paths.HOSTS:
         raise ValueError(f"unsupported partner host: {host}")
-    caller = next((s for s in found if s["id"] == caller_id), None)
-    if caller is None:
+    callers = [s for s in found if s["id"] == caller_id]
+    if not callers:
         raise ValueError("caller is not a discovered session; check --session and --minutes")
+    if len(callers) > 1:
+        raise ValueError(_ambiguity_error("caller", caller_id, callers))
+    caller = callers[0]
     root = paths.resolved(directory)
     if not Path(root).is_dir():
         raise ValueError(f"partner directory does not exist: {root}")
@@ -317,10 +330,18 @@ def check_partner_profile(pair, session_id):
 
 def attach_partner(session_id, caller_id, found, profile_id=None):
     paths.validate_session_id(session_id)
-    caller = next((s for s in found if s["id"] == caller_id), None)
-    peer = next((s for s in found if s["id"] == session_id), None)
-    if not caller or not peer or session_id == caller_id:
+    if session_id == caller_id:
         raise ValueError("attach requires two different discovered sessions")
+    callers = [s for s in found if s["id"] == caller_id]
+    peers = [s for s in found if s["id"] == session_id]
+    if len(callers) > 1:
+        raise ValueError(_ambiguity_error("caller", caller_id, callers))
+    if len(peers) > 1:
+        raise ValueError(_ambiguity_error("partner", session_id, peers))
+    if not callers or not peers:
+        raise ValueError("attach requires two different discovered sessions")
+    caller = callers[0]
+    peer = peers[0]
     peer_cwd = paths.resolved(peer["cwd"])
     pair = {
         "id": uuid.uuid4().hex,
@@ -342,7 +363,9 @@ def attach_partner(session_id, caller_id, found, profile_id=None):
             raise profiles.ProfileError("existing worker host/directory does not match the profile")
     for existing in all_pairs():
         if (
-            existing["caller"]["id"] == caller_id
+            existing["caller"]["host"] == caller["host"]
+            and existing["caller"]["id"] == caller_id
+            and existing["partner"]["host"] == peer["host"]
             and existing["partner"]["id"] == session_id
             and existing.get("profile") == profile_id
             and existing["status"] == "connected"
@@ -459,16 +482,28 @@ def claim_invitation(pair):
             )
 
 
-def connect_partner(pair_id, session_id, caller_id, found, host_id=None):
+def connect_partner(pair_id, session_id, caller_id, found, host_id=None, *, caller_host=None):
     """Connect a pair to a discovered session, validating host and working directory."""
     paths.validate_session_id(session_id)
     with paths.locked(paths.pair_path(pair_id)):
         pair = read_pair(pair_id)
-        if caller_id not in (pair["caller"]["id"], session_id):
+        initiator = pair["caller"]
+        expected = pair["partner"]
+        if caller_id not in (initiator["id"], session_id):
             raise ValueError("only a pair endpoint can record the connection")
-        if session_id == pair["caller"]["id"]:
+        if session_id == initiator["id"]:
             raise ValueError("a session cannot be its own partner")
-        if host_id and (pair["partner"]["host"] != "codex" or host_id != "local"):
+        if caller_host is None:
+            callers = [s for s in found if s["id"] == caller_id]
+            if len(callers) > 1:
+                raise ValueError(_ambiguity_error("caller", caller_id, callers))
+            if callers:
+                caller_host = callers[0]["host"]
+        if caller_id == session_id and caller_host != expected["host"]:
+            raise ValueError("self-connect requires a caller on the requested partner host")
+        if caller_id == initiator["id"] and caller_host not in (None, initiator["host"]):
+            raise ValueError("caller must be on the initiating session's host")
+        if host_id and (expected["host"] != "codex" or host_id != "local"):
             raise ValueError("only local Codex partners support --host-id local")
         if pair["status"] == "completed":
             raise ValueError("completed pair cannot be reconnected")
@@ -482,10 +517,14 @@ def connect_partner(pair_id, session_id, caller_id, found, host_id=None):
                 paths.write_json(paths.pair_path(pair_id), pair)
             claim_invitation(pair)
             return pair
-        peer = next((s for s in found if s["id"] == session_id), None)
-        expected = pair["partner"]
-        if peer is None or peer["host"] != expected["host"]:
+        matches_peer = [
+            s for s in found if s["id"] == session_id and s["host"] == expected["host"]
+        ]
+        if not matches_peer:
             raise ValueError("partner must be a discovered session of the requested host")
+        if len(matches_peer) > 1:
+            raise ValueError(_ambiguity_error("partner", session_id, matches_peer))
+        peer = matches_peer[0]
         matches = (
             paths.resolved(peer["cwd"]) == expected["cwd"]
             if peer["host"] == "codex"

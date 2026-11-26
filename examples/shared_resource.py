@@ -16,7 +16,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 from agent_sessions.resource_client import (
     ResourceClient,
-    read_private,
+    read_private_bytes,
     supervisor_lock,
     write_private,
 )
@@ -39,15 +39,23 @@ def run(client, handle):
 def supervised_run(client, handle):
     state, payload = client.resume(handle)
     receipt_path = Path(handle).with_suffix('.receipt.json')
-    if receipt_path.exists():
-        proof = read_private(receipt_path)
-        if (proof.get('ticket') != state['id'] or proof.get('fence') != state['fence']
+    try:
+        raw = read_private_bytes(receipt_path)
+    except FileNotFoundError:
+        if receipt_path.is_symlink():
+            raise ValueError('Use a canonical checkpoint without symbolic links') from None
+        raw = None
+    if raw is not None:
+        proof = json.loads(raw)
+        if (not isinstance(proof, dict)
+                or proof.get('ticket') != state['id']
+                or proof.get('fence') != state['fence']
                 or proof.get('payload_sha256') != state['payload_sha256']
                 or proof.get('cleanup_error') is not None
                 or not (type(proof.get('exit_code')) is int or proof.get('launch')=='not-started')):
             raise ValueError('Existing proof does not establish this fixed workload exit')
         outcome = 'completed' if proof.get('exit_code') == 0 and not proof.get('error') else 'failed'
-        return client.finish(state, outcome, hashlib.sha256(receipt_path.read_bytes()).hexdigest())
+        return client.finish(state, outcome, hashlib.sha256(raw).hexdigest())
     if state['state'] not in ('queued','granted'):
         raise ValueError('Existing attempt cannot be replayed; reconcile its supervisor proof')
     state = client.wait(state['id'], seconds=60)

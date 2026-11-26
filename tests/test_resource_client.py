@@ -1,6 +1,7 @@
 """Real CLI checkpoints and the fixed subprocess example survive requester exit."""
 
 import concurrent.futures
+import hashlib
 import json
 import os
 import subprocess
@@ -9,13 +10,21 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT / 'src') not in sys.path:
     sys.path.insert(0, str(ROOT / 'src'))
 
-from agent_sessions.resource_client import ResourceClient, read_private, supervisor_lock
-from examples.shared_resource import run, submit
+import examples.shared_resource as shared_resource
+from agent_sessions.resource_client import (
+    ResourceClient,
+    read_private,
+    read_private_bytes,
+    supervisor_lock,
+    write_private,
+)
+from examples.shared_resource import run, submit, supervised_run
 
 
 class ResourceClientTests(unittest.TestCase):
@@ -120,3 +129,137 @@ submit(c,sys.argv[1],'compaction-attempt',.01)
         with self.assertRaises(RuntimeError):
             anon.resume(bad_handle)
         self.assertIsNone(anon.owner)
+
+    def test_receipt_recovery_reads_once_and_rejects_symlinks_and_loops(self):
+        ticket = submit(self.client, self.handle, 'receipt-recovery', .01)
+        grant = self.client.wait(ticket['id'], seconds=5)
+        self.client.start(grant)
+        receipt_path = self.handle.with_suffix('.receipt.json')
+        proof = {
+            'ticket': grant['id'],
+            'fence': grant['fence'],
+            'payload_sha256': grant['payload_sha256'],
+            'exit_code': 0,
+            'cleanup_error': None,
+        }
+
+        # Live symlink receipt must be rejected.
+        real_target = self.root / 'real-target.receipt.json'
+        write_private(real_target, proof)
+        receipt_path.symlink_to(real_target)
+        with self.assertRaisesRegex(ValueError, 'symbolic links'):
+            read_private_bytes(receipt_path)
+        with self.assertRaisesRegex(ValueError, 'symbolic links'):
+            supervised_run(self.client, self.handle)
+        receipt_path.unlink()
+
+        # Dangling symlink receipt must fail closed with ValueError, not be treated as absent.
+        receipt_path.symlink_to(self.root / 'missing-target.receipt.json')
+        with self.assertRaisesRegex(ValueError, 'symbolic links'):
+            read_private_bytes(receipt_path)
+        with self.assertRaisesRegex(ValueError, 'symbolic links'):
+            supervised_run(self.client, self.handle)
+        receipt_path.unlink()
+
+        # Self-referencing symlink loop must raise ValueError, not RuntimeError.
+        receipt_path.symlink_to(receipt_path)
+        with self.assertRaisesRegex(ValueError, 'symbolic links'):
+            read_private_bytes(receipt_path)
+        with self.assertRaisesRegex(ValueError, 'symbolic links'):
+            supervised_run(self.client, self.handle)
+        receipt_path.unlink()
+
+        # Valid pre-existing receipt is read once and hashed from those exact bytes without Path.read_bytes.
+        expected_digest = write_private(receipt_path, proof)
+        decoy = self.root / 'decoy.receipt.json'
+        decoy.write_text('{"tampered": true}\n', encoding='utf-8')
+        read_calls = []
+        recorded_evidence = []
+        original_read_bytes = Path.read_bytes
+
+        def guarded_read_bytes(path_obj):
+            if path_obj.resolve(strict=False) == receipt_path:
+                raise AssertionError('supervised_run must not re-open receipt via Path.read_bytes')
+            return original_read_bytes(path_obj)
+
+        def single_read_and_swap(path_obj):
+            raw = read_private_bytes(path_obj)
+            read_calls.append(Path(path_obj))
+            # Swap receipt on disk immediately after the single validated read to prove TOCTOU immunity.
+            receipt_path.unlink()
+            receipt_path.symlink_to(decoy)
+            return raw
+
+        class RecordingClient(ResourceClient):
+            def finish(inner, finish_grant, outcome, evidence=None):
+                recorded_evidence.append((outcome, evidence))
+                return super().finish(finish_grant, outcome, evidence)
+
+        recording_client = RecordingClient(
+            command=self.command, owner='fixture-owner', environment=self.env
+        )
+        with (
+            mock.patch.object(Path, 'read_bytes', autospec=True, side_effect=guarded_read_bytes),
+            mock.patch.object(shared_resource, 'read_private_bytes', side_effect=single_read_and_swap),
+        ):
+            result = supervised_run(recording_client, self.handle)
+
+        self.assertEqual(result['state'], 'completed')
+        self.assertEqual(read_calls, [receipt_path])
+        self.assertEqual(recorded_evidence, [('completed', expected_digest)])
+        # Confirm the broker recorded the exact original receipt digest, not the post-read decoy.
+        self.assertEqual(self.client.finish(grant, 'completed', expected_digest)['state'], 'completed')
+        with self.assertRaisesRegex(RuntimeError, 'different terminal result'):
+            self.client.finish(grant, 'completed', hashlib.sha256(decoy.read_bytes()).hexdigest())
+
+    def test_leading_dash_inputs_fail_closed_in_broker_subprocess(self):
+        for bad in ('--help', '-bad'):
+            bad_owner = ResourceClient(command=self.command, owner=bad, environment=self.env)
+            with self.assertRaisesRegex(RuntimeError, r'^Resource broker refused request:') as ctx:
+                bad_owner.request('example.heavy', 'valid-key', {'step': 1})
+            self.assertNotIn('usage:', str(ctx.exception))
+
+            with self.assertRaisesRegex(RuntimeError, r'^Resource broker refused status:') as ctx:
+                bad_owner.status('0' * 32)
+            self.assertNotIn('usage:', str(ctx.exception))
+
+            with self.assertRaisesRegex(RuntimeError, r'^Resource broker refused events:') as ctx:
+                bad_owner.events()
+            self.assertNotIn('usage:', str(ctx.exception))
+
+            with self.assertRaisesRegex(RuntimeError, r'^Resource broker refused request:') as ctx:
+                self.client.request(bad, 'valid-key', {'step': 1})
+            self.assertNotIn('usage:', str(ctx.exception))
+
+            with self.assertRaisesRegex(RuntimeError, r'^Resource broker refused request:') as ctx:
+                self.client.request('example.heavy', bad, {'step': 1})
+            self.assertNotIn('usage:', str(ctx.exception))
+
+            with self.assertRaisesRegex(RuntimeError, r'^Resource broker refused status:') as ctx:
+                self.client.status(bad)
+            self.assertNotIn('usage:', str(ctx.exception))
+
+            with self.assertRaisesRegex(RuntimeError, r'^Resource broker refused cancel:') as ctx:
+                self.client.cancel(bad)
+            self.assertNotIn('usage:', str(ctx.exception))
+
+            with self.assertRaisesRegex(RuntimeError, r'^Resource broker refused wait:') as ctx:
+                self.client.wait(bad, seconds=1)
+            self.assertNotIn('usage:', str(ctx.exception))
+
+            bad_grant = {'id': bad, 'lease': '0' * 32, 'fence': 1}
+            with self.assertRaisesRegex(RuntimeError, r'^Resource broker refused start:') as ctx:
+                self.client.start(bad_grant)
+            self.assertNotIn('usage:', str(ctx.exception))
+
+            with self.assertRaisesRegex(RuntimeError, r'^Resource broker refused finish:') as ctx:
+                self.client.finish(bad_grant, 'completed', hashlib.sha256(b'ok').hexdigest())
+            self.assertNotIn('usage:', str(ctx.exception))
+
+        with self.assertRaisesRegex(RuntimeError, r'^Resource broker refused start:') as ctx:
+            self.client.start({'id': '0' * 32, 'lease': '--help', 'fence': 1})
+        self.assertNotIn('usage:', str(ctx.exception))
+
+        with self.assertRaisesRegex(RuntimeError, r'^Resource broker refused finish:') as ctx:
+            self.client.finish({'id': '0' * 32, 'lease': '0' * 32, 'fence': 1}, 'completed', '--help')
+        self.assertNotIn('usage:', str(ctx.exception))
