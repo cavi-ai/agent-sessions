@@ -338,6 +338,101 @@ config = [{name = "painter", enabled = false}]
         (self.data / 'bindings/codex-sub-0002.json').write_text('broken')
         self.assertEqual(self.hook_for(profile).returncode, 2)
 
+    def test_guard_accepts_session_cwd_that_differs_only_in_letter_case(self):
+        directory = self.root / 'CaseDir'
+        directory.mkdir()
+        lower = self.root / 'casedir'
+        if not lower.exists():
+            self.skipTest('case-sensitive filesystem')
+        config = directory / '.codex/config.toml'
+        config.parent.mkdir()
+        config.write_text('[features]\napps = false\nplugins = false\n')
+        profile = json.loads(self.run_tool('profile', 'create', 'codex', str(lower), 'casing'))
+        self.assertEqual(profile['cwd'], str(directory))
+        for hook_cwd in (str(directory), str(lower)):
+            with self.subTest(hook_cwd=hook_cwd):
+                result = self.hook_for({**profile, 'cwd': hook_cwd})
+                self.assertEqual(result.returncode, 0, result.stderr)
+        binding = json.loads((self.data / 'bindings/codex-sub-0002.json').read_text())
+        self.assertEqual(binding['state'], 'configured')
+
+        # Pre-existing profiles saved with non-canonical case must still validate and pass guard.
+        legacy_value = {
+            'version': 1,
+            'name': 'legacy-casing',
+            'host': 'codex',
+            'cwd': str(lower),
+            'files': profile['files'],
+        }
+        legacy_id = session_profiles.fingerprint(legacy_value)
+        legacy_profile = {'id': legacy_id, **legacy_value}
+        (self.data / 'profiles' / f'{legacy_id}.json').write_text(json.dumps(legacy_profile))
+        shown = json.loads(self.run_tool('profile', 'show', legacy_id))
+        self.assertEqual(shown['id'], legacy_id)
+        legacy_hook = self.hook_for(
+            {**legacy_profile, 'cwd': str(directory)}, session='codex-legacy-case-1'
+        )
+        self.assertEqual(legacy_hook.returncode, 0, legacy_hook.stderr)
+
+    def test_profile_launch_warns_when_host_hooks_are_not_registered(self):
+        profile, _ = self.profile('agy')
+        binary = self.root / 'agy-warn-bin'
+        binary.mkdir()
+        fake = binary / 'agy'
+        fake.write_text('#!/bin/sh\nexit 0\n')
+        fake.chmod(0o755)
+        env = {**self.env, 'PATH': str(binary) + os.pathsep + self.env['PATH']}
+        unconfigured = subprocess.run(
+            [*TOOL_CMD, 'profile', 'launch', profile['id']],
+            env=env, capture_output=True, text=True, timeout=30, check=False,
+        )
+        self.assertEqual(unconfigured.returncode, 0, unconfigured.stderr)
+        self.assertIn('hooks are not registered', unconfigured.stderr)
+        self.assertIn('agent-sessions configure agy', unconfigured.stderr)
+
+        self.run_tool('configure', 'agy')
+        configured = subprocess.run(
+            [*TOOL_CMD, 'profile', 'launch', profile['id']],
+            env=env, capture_output=True, text=True, timeout=30, check=False,
+        )
+        self.assertEqual(configured.returncode, 0, configured.stderr)
+        self.assertNotIn('hooks are not registered', configured.stderr)
+
+    def test_opencode_profile_launch_continues_when_plugin_cannot_be_read(self):
+        profile, _ = self.profile('opencode')
+        binary = self.root / 'bin'
+        binary.mkdir()
+        executable = binary / 'opencode'
+        executable.write_text('#!/bin/sh\nprintf "host launched\\n"\n')
+        executable.chmod(0o755)
+        env = {**self.env, 'PATH': str(binary) + os.pathsep + self.env['PATH']}
+        plugin = self.opencode_config / 'plugins' / 'agent-sessions.ts'
+        plugin.parent.mkdir(parents=True)
+
+        for invalid_plugin in ('invalid UTF-8', 'symlink loop'):
+            with self.subTest(invalid_plugin=invalid_plugin):
+                if invalid_plugin == 'invalid UTF-8':
+                    plugin.write_bytes(b'\xff')
+                else:
+                    plugin.unlink()
+                    plugin.symlink_to(plugin.name)
+                launched = subprocess.run(
+                    [*TOOL_CMD, 'profile', 'launch', profile['id']],
+                    env=env, capture_output=True, text=True, timeout=30, check=False,
+                )
+                self.assertEqual(launched.returncode, 0, launched.stderr)
+                self.assertEqual(launched.stdout, 'host launched\n')
+                self.assertIn('hooks are not registered', launched.stderr)
+
+                check = subprocess.run(
+                    [*TOOL_CMD, '--json', 'configure', 'opencode', '--check'],
+                    env=env, capture_output=True, text=True, timeout=30, check=False,
+                )
+                self.assertEqual(check.returncode, 1, check.stderr)
+                status = json.loads(check.stdout)
+                self.assertFalse(status['installed'])
+                self.assertTrue(status['error'])
+
     def test_claude_subagent_preserves_messages_and_profile_guard(self):
         profile, config = self.profile('claude')
         self.run_tool('send', 'claude-0006', 'for the main thread')

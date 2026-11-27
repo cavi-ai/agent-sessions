@@ -1,7 +1,7 @@
 """Local session discovery, messaging, partner coordination, and resource admission."""
 
 from .cli import main
-from .hooks import configure_hooks, hook
+from .hooks import configure_hooks, hook, hook_status
 from .hosts import describe, sessions, who
 from .partners import (
     all_pairs,
@@ -26,6 +26,7 @@ __all__ = [
     "create_partner",
     "describe",
     "hook",
+    "hook_status",
     "launch_profile",
     "locked",
     "main",

@@ -578,6 +578,48 @@ class ClaudeHostTests(Machine):
 
 
 class ClaimTests(Machine):
+    def test_upgrade_preserves_mixed_case_path_messages_and_receipts(self):
+        workspace = self.root / "CaseRepo"
+        workspace.mkdir()
+        old_path = self.root / "caserepo"
+        if not old_path.is_dir():
+            self.skipTest("case-sensitive filesystem")
+        old_hash = hashlib.sha256(str(old_path).encode()).hexdigest()[:16]
+        old_queue = self.data / "queue" / ("p-" + old_hash) / "new"
+        old_queue.mkdir(parents=True)
+        legacy = self.data / "paths"
+        legacy.mkdir()
+        message = {
+            "id": "before-upgrade", "path": str(old_path), "from": "peer",
+            "from_id": "codex-main-0001", "at": "2026-01-01T00:00:00Z",
+            "text": "queued before the upgrade",
+        }
+        (old_queue / "before-upgrade.json").write_text(json.dumps(message))
+        (legacy / (old_hash + ".jsonl")).write_text(json.dumps({
+            **message, "id": "legacy-path", "text": "queued in the legacy inbox",
+        }) + "\n")
+        receipt = self.data / "receipts" / "before-upgrade" / "already-saw-it"
+        receipt.parent.mkdir(parents=True)
+        receipt.touch()
+
+        def inbox(session_id):
+            output = subprocess.run(
+                [*TOOL_CMD, "--json", "inbox", "--session", session_id], cwd=workspace,
+                env=self.env, capture_output=True, text=True, timeout=30, check=True,
+            )
+            return [item["id"] for item in json.loads(output.stdout)]
+
+        self.assertEqual(inbox("already-saw-it"), ["legacy-path"])
+        self.assertCountEqual(inbox("new-recipient"), ["before-upgrade", "legacy-path"])
+        claimed = subprocess.run(
+            [*TOOL_CMD, "--json", "claim", "before-upgrade", "--session", "new-recipient"],
+            cwd=workspace, env=self.env, capture_output=True, text=True, timeout=30,
+            check=False,
+        )
+        self.assertEqual(claimed.returncode, 0, claimed.stderr)
+        self.assertEqual(json.loads(claimed.stdout)["claimed"]["claimed_by"], "new-recipient")
+        self.assertEqual(inbox("later-recipient"), ["legacy-path"])
+
     def test_legacy_migration_waits_for_delivery_state_repair_without_replay(self):
         for kind in ("inbox", "paths"):
             with self.subTest(kind=kind):
@@ -1023,6 +1065,78 @@ class AgyHostTests(Machine):
         self.assertEqual(body["terminationBehavior"], "terminate")
         self.assertIn("agent-sessions hook:", proc.stderr)
 
+    def test_agy_pre_tool_use_without_session_id_returns_allow(self):
+        out = json.loads(self.run_tool(
+            "hook", "--host", "agy",
+            stdin=json.dumps({"hookEventName": "PreToolUse"}),
+        ))
+        self.assertEqual(out, {"decision": "allow"})
+
+    def test_agy_discovers_session_with_empty_workspace_uris_via_hook_state_and_connects(self):
+        (self.worktree / ".agents").mkdir(exist_ok=True)
+        (self.worktree / ".agents/settings.json").write_text("{}\n")
+        (self.worktree / ".agents/mcp_config.json").write_text('{"mcpServers": {}}\n')
+        profile = json.loads(self.run_tool(
+            "profile", "create", "agy", str(self.worktree), "worker"
+        ))
+        pair = json.loads(self.run_tool(
+            "partner", "agy", str(self.worktree), "Work brief",
+            "--profile", profile["id"], "--session", "codex-main-0001",
+        ))
+        # Antigravity CLI often leaves workspace_uris empty on prompt-interactive launches.
+        self._write_agy_db([
+            ("agy-empty-uri-1", "Register Partner Session", "", str(self.now),
+             "", "CASCADE_RUN_STATUS_IDLE", "", "", 0, 0),
+            ("agy-unprofiled-empty-2", "Unprofiled Session", "", str(self.now),
+             "", "CASCADE_RUN_STATUS_IDLE", "", "", 0, 0),
+        ])
+        self.assertEqual(json.loads(self.run_tool("--json", "list", "--host", "agy")), [])
+
+        # Profiled SessionStart hook with file:// workspace URI binds and records cwd.
+        start_env = {**self.env, "AGENT_SESSIONS_PROFILE_ID": profile["id"]}
+        self.run_tool(
+            "hook", "--host", "agy", env=start_env,
+            stdin=json.dumps({
+                "conversationId": "agy-empty-uri-1",
+                "hookEventName": "SessionStart",
+                "workspacePaths": [self.worktree.as_uri()],
+            }),
+        )
+        # Unprofiled SessionStart hook records cwd in state.
+        self.run_tool(
+            "hook", "--host", "agy",
+            stdin=json.dumps({
+                "conversationId": "agy-unprofiled-empty-2",
+                "hookEventName": "SessionStart",
+                "workspacePaths": [str(self.repo)],
+            }),
+        )
+        for workspace_fields in ({}, {"cwd": "relative"}, {"workspacePaths": ["relative"]}):
+            with self.subTest(workspace_fields=workspace_fields):
+                subprocess.run(
+                    [*TOOL_CMD, "hook", "--host", "agy"], cwd=self.worktree, env=self.env,
+                    input=json.dumps({
+                        "conversationId": "agy-unprofiled-empty-2",
+                        "hookEventName": "PostToolUse",
+                        **workspace_fields,
+                    }),
+                    capture_output=True, text=True, timeout=30, check=True,
+                )
+                state = self.data / "state" / "agy-unprofiled-empty-2.json"
+                self.assertEqual(json.loads(state.read_text())["cwd"], str(self.repo))
+
+        found = {s["id"]: s for s in json.loads(self.run_tool("--json", "list", "--host", "agy"))}
+        self.assertEqual(set(found), {"agy-empty-uri-1", "agy-unprofiled-empty-2"})
+        self.assertEqual(found["agy-empty-uri-1"]["cwd"], str(self.worktree))
+        self.assertEqual(found["agy-unprofiled-empty-2"]["cwd"], str(self.repo))
+
+        connected = json.loads(self.run_tool(
+            "partner", "connect", pair["id"],
+            env={**self.env, "ANTIGRAVITY_CONVERSATION_ID": "agy-empty-uri-1"},
+        ))
+        self.assertEqual(connected["status"], "connected")
+        self.assertEqual(connected["partner"]["id"], "agy-empty-uri-1")
+
 
 class OpenCodeHostTests(Machine):
     """OpenCode 2.x keeps sessions in session_v2 and transcripts in session_message."""
@@ -1271,7 +1385,8 @@ class HardeningRegressionTests(Machine):
         fake_home = self.root / "fake-home"
         for subdir, cid, title in (
             (".gemini/antigravity-cli", "agy-cli-0001", "CLI task"),
-            (".gemini/antigravity", "agy-ide-0002", "IDE task"),
+            (".gemini/antigravity", "agy-app-0002", "App task"),
+            (".gemini/antigravity-ide", "agy-ide-0003", "IDE task"),
         ):
             target = fake_home / subdir
             target.mkdir(parents=True)
@@ -1291,7 +1406,121 @@ class HardeningRegressionTests(Machine):
         env = {k: v for k, v in self.env.items() if k not in ("AGY_HOME", "ANTIGRAVITY_APP_DATA_DIR")}
         env["HOME"] = str(fake_home)
         found = {s["id"]: s for s in json.loads(self.run_tool("--json", "list", "--host", "agy", env=env))}
-        self.assertEqual(set(found), {"agy-cli-0001", "agy-ide-0002"})
+        self.assertEqual(set(found), {"agy-cli-0001", "agy-app-0002", "agy-ide-0003"})
+
+    def test_configure_check_and_all_hosts(self):
+        before = subprocess.run(
+            [*TOOL_CMD, "--json", "configure", "all", "--check"],
+            env=self.env, capture_output=True, text=True, timeout=30, check=False,
+        )
+        self.assertEqual(before.returncode, 1)
+        items = json.loads(before.stdout)
+        self.assertEqual([item["host"] for item in items], ["codex", "claude", "agy", "opencode"])
+        self.assertTrue(all(not item["installed"] for item in items))
+
+        self.run_tool("configure", "all")
+        after = json.loads(self.run_tool("--json", "configure", "all", "--check"))
+        self.assertTrue(all(item["installed"] for item in after))
+
+        # Disabling the agy hook group or Claude's disableAllHooks must report not installed.
+        agy_hooks = self.agy_config / "hooks.json"
+        agy_cfg = json.loads(agy_hooks.read_text())
+        agy_cfg["agent-sessions"]["enabled"] = False
+        agy_hooks.write_text(json.dumps(agy_cfg))
+        agy_disabled = subprocess.run(
+            [*TOOL_CMD, "--json", "configure", "agy", "--check"],
+            env=self.env, capture_output=True, text=True, timeout=30, check=False,
+        )
+        self.assertEqual(agy_disabled.returncode, 1)
+        self.assertIn("disabled", json.loads(agy_disabled.stdout)["error"])
+
+        claude_settings = self.claude / "settings.json"
+        claude_cfg = json.loads(claude_settings.read_text())
+        claude_cfg["disableAllHooks"] = True
+        claude_settings.write_text(json.dumps(claude_cfg))
+        claude_disabled = subprocess.run(
+            [*TOOL_CMD, "--json", "configure", "claude", "--check"],
+            env=self.env, capture_output=True, text=True, timeout=30, check=False,
+        )
+        self.assertEqual(claude_disabled.returncode, 1)
+        self.assertIn("disableAllHooks", json.loads(claude_disabled.stdout)["error"])
+
+        self.run_tool("configure", "all", "--remove")
+        removed = subprocess.run(
+            [*TOOL_CMD, "--json", "configure", "all", "--check"],
+            env=self.env, capture_output=True, text=True, timeout=30, check=False,
+        )
+        self.assertEqual(removed.returncode, 1)
+
+    def test_case_insensitive_path_queue_who_and_partner_connect(self):
+        case_repo = self.root / "CaseRepo"
+        case_repo.mkdir()
+        lower_repo = self.root / "caserepo"
+        if not lower_repo.exists():
+            self.skipTest("case-sensitive filesystem")
+        git("init", cwd=case_repo)
+        (case_repo / "file.txt").write_text("hello\n")
+        git("add", "file.txt", cwd=case_repo)
+        git("commit", "-m", "init", cwd=case_repo)
+
+        project = self.claude / "projects" / "-caserepo"
+        project.mkdir(parents=True)
+        (project / "claude-case-0001.jsonl").write_text(json.dumps({
+            "type": "user", "cwd": str(case_repo), "message": {"content": "hi"},
+        }) + "\n")
+
+        # Path message sent to lowercase path must be delivered when hook reports canonical case.
+        self.run_tool("send", str(lower_repo), "case message", "--session", "codex-main-0001")
+        delivered = json.loads(self.run_tool(
+            "hook", "--host", "claude",
+            stdin=json.dumps({
+                "session_id": "claude-case-0001",
+                "cwd": str(case_repo),
+                "hook_event_name": "PostToolUse",
+            }),
+        ))
+        context = delivered["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("case message", context)
+        self.assertIn(sys.executable, context)
+
+        # who with lowercase path must find session in CaseRepo.
+        who_res = json.loads(self.run_tool("--json", "who", str(lower_repo)))
+        self.assertEqual([s["id"] for s in who_res["sessions"]], ["claude-case-0001"])
+
+        # Partner created with lowercase path must connect to session discovered in CaseRepo.
+        pair = json.loads(self.run_tool(
+            "partner", "claude", str(lower_repo), "Case brief",
+            "--session", "codex-main-0001",
+        ))
+        self.assertEqual(pair["partner"]["cwd"], str(case_repo))
+        connected = json.loads(self.run_tool(
+            "partner", "connect", pair["id"],
+            env={**self.env, "CLAUDE_CODE_SESSION_ID": "claude-case-0001"},
+        ))
+        self.assertEqual(connected["status"], "connected")
+
+    def test_inbox_uses_environment_host_for_invitations_when_session_not_in_found(self):
+        pair = json.loads(self.run_tool(
+            "partner", "claude", str(self.worktree), "Brand new session brief",
+            "--session", "codex-main-0001",
+        ))
+        # Record session start via hook without creating a Claude project JSONL yet.
+        self.run_tool(
+            "hook", "--host", "claude",
+            stdin=json.dumps({
+                "session_id": "claude-unflushed-0001",
+                "cwd": str(self.repo),
+                "hook_event_name": "SessionStart",
+                "source": "startup",
+            }),
+        )
+        env = {**self.env, "CLAUDE_CODE_SESSION_ID": "claude-unflushed-0001"}
+        proc = subprocess.run(
+            [*TOOL_CMD, "--json", "inbox"],
+            cwd=str(self.worktree), env=env, capture_output=True, text=True, timeout=30, check=True,
+        )
+        messages = json.loads(proc.stdout)
+        self.assertTrue(any(m.get("pair_id") == pair["id"] for m in messages))
 
 
 if __name__ == "__main__":

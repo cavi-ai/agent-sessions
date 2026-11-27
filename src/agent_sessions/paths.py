@@ -172,13 +172,14 @@ def agy_home():
 
 
 def agy_homes():
-    """Antigravity app-data homes to scan (explicit env override, or both CLI and IDE defaults)."""
+    """Antigravity app-data homes to scan (explicit env override, or CLI, app, and IDE defaults)."""
     explicit = os.environ.get("AGY_HOME") or os.environ.get("ANTIGRAVITY_APP_DATA_DIR")
     if explicit:
         return [Path(explicit)]
     candidates = [
         Path.home() / ".gemini/antigravity-cli",
         Path.home() / ".gemini/antigravity",
+        Path.home() / ".gemini/antigravity-ide",
     ]
     seen, out = set(), []
     for candidate in candidates:
@@ -215,11 +216,41 @@ def data_dir():
     )
 
 
+def _canonicalize_case(path: Path) -> str:
+    """Return the filesystem's canonical casing for path on macOS (F_GETPATH) when available."""
+    if not hasattr(fcntl, "F_GETPATH"):
+        return str(path)
+    current = path
+    tail = []
+    while not current.exists() and current != current.parent:
+        tail.append(current.name)
+        current = current.parent
+    flags = getattr(os, "O_EVTONLY", os.O_RDONLY | os.O_NONBLOCK)
+    try:
+        fd = os.open(current, flags)
+    except OSError:
+        return str(path)
+    try:
+        raw = fcntl.fcntl(fd, fcntl.F_GETPATH, b"\0" * 1024)
+    except (OSError, ValueError):
+        return str(path)
+    finally:
+        os.close(fd)
+    canonical = os.fsdecode(raw.split(b"\0", 1)[0])
+    if not canonical:
+        return str(path)
+    return os.path.join(canonical, *reversed(tail)) if tail else canonical
+
+
 def resolved(path):
     try:
-        return str(Path(path).expanduser().resolve())
+        return _canonicalize_case(Path(path).expanduser().resolve())
     except (OSError, RuntimeError):
         return str(path)
+
+
+def resolved_strict(path):
+    return _canonicalize_case(Path(path).expanduser().resolve(strict=True))
 
 
 def inside(path, root):
@@ -229,7 +260,14 @@ def inside(path, root):
 def home(path):
     text = str(path)
     user = str(Path.home())
-    return "~" + text[len(user) :] if inside(text, user) else text
+    if inside(text, user):
+        return "~" + text[len(user) :]
+    if Path(text).is_absolute():
+        canonical_text = resolved(text)
+        canonical_user = resolved(user)
+        if inside(canonical_text, canonical_user):
+            return "~" + canonical_text[len(canonical_user) :]
+    return text
 
 
 def ancestors(path):

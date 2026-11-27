@@ -110,10 +110,13 @@ def _build_parser():
     )
     hooking.add_argument("--host", choices=paths.HOST_CHOICES, help="receiving host")
     configuring = sub.add_parser("configure", help="install or remove hooks, preserving settings")
-    configuring.add_argument("host", choices=paths.HOST_CHOICES)
+    configuring.add_argument("host", choices=(*paths.HOST_CHOICES, "all"))
     configuring.add_argument("--dry-run", action="store_true", help="print settings without writing")
     configuring.add_argument(
         "--remove", action="store_true", help="remove this installation's hooks"
+    )
+    configuring.add_argument(
+        "--check", action="store_true", help="check whether hooks are registered without modifying"
     )
     profiling = sub.add_parser("profile", help="pin and launch native partner configuration")
     profile_actions = profiling.add_subparsers(dest="profile_action", required=True)
@@ -389,6 +392,42 @@ def _main(argv=None):
         return 0
 
     if args.command == "configure":
+        targets = list(paths.HOSTS) if args.host == "all" else [args.host]
+        if args.check:
+            if args.remove or args.dry_run:
+                raise ValueError("--check cannot be combined with --remove or --dry-run")
+            statuses = [hooks.hook_status(target) for target in targets]
+            if args.json:
+                print(json.dumps(statuses if args.host == "all" else statuses[0], indent=2))
+            else:
+                for item in statuses:
+                    if item["installed"]:
+                        print(f"{item['host']}: ok ({item['path']})")
+                    else:
+                        detail = item["error"] or (
+                            "missing " + ", ".join(item["missing"])
+                        )
+                        print(f"{item['host']}: not configured ({item['path']}): {detail}")
+            return 0 if all(item["installed"] for item in statuses) else 1
+        if args.host == "all":
+            results = {}
+            for target in targets:
+                path, config = hooks.configure_hooks(target, args.dry_run, args.remove)
+                results[target] = config
+                if not args.dry_run and not args.json:
+                    print(
+                        f"{'Removed' if args.remove else 'Installed'} "
+                        f"agent-sessions hooks in {path}"
+                    )
+                    if target == "codex" and not args.remove:
+                        print("Review and trust the hooks in Codex Settings > Hooks or CLI /hooks.")
+                    if target == "opencode":
+                        print(
+                            "Run `opencode reload` to apply the plugin change to the running service."
+                        )
+            if args.dry_run or args.json:
+                print(json.dumps(results, indent=2))
+            return 0
         path, config = hooks.configure_hooks(args.host, args.dry_run, args.remove)
         if args.dry_run or args.json:
             print(json.dumps(config, indent=2))
@@ -507,9 +546,12 @@ def _main(argv=None):
         text = [f"Left message {message['id']} for {len(targets)} active session(s){waiting}:"]
         text += [f"- {hosts.describe(t, current_id=current_id)}" for t in targets]
     else:
+        env_host, env_id = paths.environment_session()
         session_id = args.session or hosts.self_id(os.getcwd(), found)
         cwd = next((s["cwd"] for s in found if s["id"] == session_id), os.getcwd())
-        host = next((s["host"] for s in found if s["id"] == session_id), None)
+        host = env_host if session_id == env_id and env_host else None
+        if host is None:
+            host = next((s["host"] for s in found if s["id"] == session_id), None)
         result = queue.receive(session_id, cwd, mark=not args.keep, host=host)
         text = [f"{m['id']} {m['at']} {m['from']}: {m['text']}" for m in result] or [
             "No new messages."
