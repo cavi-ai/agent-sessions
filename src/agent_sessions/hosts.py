@@ -13,7 +13,7 @@ from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import paths
+from . import paths, queue
 
 AGY_EDIT_PATH_KEYS = (
     "TargetFile",
@@ -132,13 +132,14 @@ def codex_sessions(since, include_reviews=False, within=None):
     except sqlite3.Error as exc:
         print(f"agent-sessions: cannot read {db}: {exc}", file=sys.stderr)
         return []
+    within_root = paths.resolved(within) if within else None
     found = []
     for thread, rollout, updated_ms, cwd, title, source, nickname in rows:
         if not isinstance(thread, str) or not paths.SESSION_ID_RE.fullmatch(thread):
             continue
         if not isinstance(cwd, str) or not cwd:
             continue
-        if within and not paths.inside(paths.resolved(cwd), within):
+        if within_root and not paths.inside(paths.resolved(cwd), within_root):
             continue
         parent = role = None
         try:
@@ -174,6 +175,7 @@ def codex_sessions(since, include_reviews=False, within=None):
 
 
 def claude_sessions(since, within=None):
+    within_root = paths.resolved(within) if within else None
     found = []
     for path in (paths.claude_home() / "projects").glob("*/*.jsonl"):
         if not paths.SESSION_ID_RE.fullmatch(path.stem):
@@ -205,7 +207,7 @@ def claude_sessions(since, within=None):
                     target = arguments.get("file_path") or arguments.get("notebook_path")
                     if target:
                         edited.append(target)
-        if not cwd or (within and not paths.inside(paths.resolved(cwd), within)):
+        if not cwd or (within_root and not paths.inside(paths.resolved(cwd), within_root)):
             continue
         raw_title = title.strip() if isinstance(title, str) else ""
         found.append(
@@ -367,6 +369,7 @@ def _agy_sessions_in(home_dir, since, within=None):
     except sqlite3.Error as exc:
         print(f"agent-sessions: cannot read {db}: {exc}", file=sys.stderr)
         return []
+    within_root = paths.resolved(within) if within else None
     found = []
     for (
         cid,
@@ -395,7 +398,9 @@ def _agy_sessions_in(home_dir, since, within=None):
                 if candidate:
                     cwd = candidate
                     break
-        if not cwd or (within and not paths.inside(paths.resolved(cwd), within)):
+        if not cwd:
+            cwd = queue.recorded_session_cwd(cid, "agy")
+        if not cwd or (within_root and not paths.inside(paths.resolved(cwd), within_root)):
             continue
         status_val = (
             "running"
@@ -527,11 +532,12 @@ def opencode_sessions(since, within=None):
                 "order by time_updated desc",
                 (int(since * 1000),),
             ).fetchall()
+            within_root = paths.resolved(within) if within else None
             found = []
             for sid, cwd, updated_ms, title, parent, busy, idle in rows:
                 if not isinstance(sid, str) or not paths.SESSION_ID_RE.fullmatch(sid) or not cwd:
                     continue
-                if within and not paths.inside(paths.resolved(cwd), within):
+                if within_root and not paths.inside(paths.resolved(cwd), within_root):
                     continue
                 running = busy is not None and (idle is None or busy > idle)
                 found.append(
@@ -636,11 +642,12 @@ def relative_files(session):
     """Uncommitted and recently edited files of a session, relative to its worktree."""
     git_info = session.get("git") or {}
     root = git_info.get("root")
+    root_resolved = paths.resolved(root) if root else None
     files = set(git_info.get("dirty", []))
     for path in session.get("edited", []):
         path = paths.resolved(path)
-        if root and paths.inside(path, root):
-            files.add(os.path.relpath(path, root))
+        if root_resolved and paths.inside(path, root_resolved):
+            files.add(os.path.relpath(path, root_resolved))
     return files
 
 

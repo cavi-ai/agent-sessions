@@ -49,6 +49,8 @@ See [Messaging and claims](../guides/messaging.md).
 | `configure claude` | Merge this installation's handlers into Claude settings |
 | `configure agy` | Merge Agent Sessions handlers into the named Antigravity hook group (`antigravity` alias accepted) |
 | `configure opencode` | Write the Agent Sessions plugin to the OpenCode global plugins directory |
+| `configure all` | Install, preview, check, or remove hooks across all four supported hosts |
+| `configure HOST --check` | Report whether Agent Sessions hooks are registered without modifying files (exits 1 if missing or disabled) |
 | `configure HOST --dry-run` | Print the merged settings without writing |
 | `configure HOST --remove` | Remove this installation’s matching handlers while preserving other entries |
 | `hook [--host codex\|claude\|agy\|antigravity\|opencode]` | Read one native hook payload as JSON on stdin |

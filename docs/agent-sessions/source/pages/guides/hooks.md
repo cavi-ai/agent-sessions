@@ -14,13 +14,19 @@ agent-sessions configure agy --dry-run
 agent-sessions configure opencode --dry-run
 ```
 
-Install the definitions (`antigravity` is an alias for `agy`):
+Install the definitions (`antigravity` is an alias for `agy`, or use `all` for every host):
 
 ```sh
 agent-sessions configure codex
 agent-sessions configure claude
 agent-sessions configure agy
 agent-sessions configure opencode
+```
+
+Check whether hooks are registered and enabled without modifying any files:
+
+```sh
+agent-sessions configure all --check
 ```
 
 Configuration preserves unrelated host settings and hooks. Codex and Claude

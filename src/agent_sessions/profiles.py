@@ -7,6 +7,8 @@ import stat
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from . import paths as _paths
+
 try:
     import tomllib
 except ImportError:  # Python 3.9 and 3.10
@@ -83,7 +85,7 @@ def capture(host, directory, name, extras=()):
     host = normalize_host(host)
     if host not in REQUIRED or not re.fullmatch(r'[A-Za-z][A-Za-z0-9_-]{0,63}', name):
         raise ProfileError('profile needs a supported host and a simple name')
-    root = Path(directory).expanduser().resolve(strict=True)
+    root = Path(_paths.resolved_strict(directory))
     if not root.is_dir():
         raise ProfileError('profile directory must exist')
     extra_paths = {_canonical_relative(p) for p in extras}
@@ -203,9 +205,11 @@ def guard(data, session_id, cwd, host, marker, write, expected=None):
         profile = load(data, profile_id)
         record = existing or {'profile':profile_id, 'host':profile['host'], 'cwd':profile['cwd'],
                               'state':'blocked'}
+        profile_cwd = _paths.resolved(profile['cwd'])
         if (expected not in (None,profile_id) or marker != profile_id or host != profile['host']
-                or str(Path(cwd).resolve()) != profile['cwd']
-                or record['host'] != profile['host'] or record['cwd'] != profile['cwd']):
+                or _paths.resolved(cwd) != profile_cwd
+                or record['host'] != profile['host']
+                or _paths.resolved(record['cwd']) != profile_cwd):
             raise ProfileError('profile launch context is missing or changed')
     except (OSError, ValueError, TypeError) as exc:
         if record is not None:

@@ -452,7 +452,13 @@ def record_mcp_call(item, receipt, expected):
 
 
 def _same_cwd(value, expected):
-    return isinstance(value, str) and bool(value) and str(Path(value).resolve()) == expected
+    return (
+        isinstance(value, str)
+        and bool(value)
+        and isinstance(expected, str)
+        and bool(expected)
+        and paths.resolved(value) == paths.resolved(expected)
+    )
 
 
 def execute(pair, receipt, persist, timeout, filename, no_mcp, profile, local, complete=False, archive=False, metrics=False):

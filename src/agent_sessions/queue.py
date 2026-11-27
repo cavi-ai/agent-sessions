@@ -26,6 +26,8 @@ def load_state(session_id):
                 for key in ("delivered", "warned")
             )
             or not isinstance(state.get("started", ""), str)
+            or not isinstance(state.get("host", ""), str)
+            or not isinstance(state.get("cwd", ""), str)
         ):
             raise ValueError("expected warned and delivered lists and a started timestamp")
         state.setdefault("warned", [])
@@ -47,6 +49,47 @@ def record_start(session_id, started=None):
         if not state.get("started"):
             state["started"] = started or datetime.now(timezone.utc).isoformat()
             save_state(session_id, state)
+
+
+def record_session_context(session_id, host, cwd):
+    """Remember a session's host and canonical cwd when native metadata omits workspace URIs."""
+    if not host or not cwd:
+        return
+    canonical = paths.resolved(cwd)
+    if not Path(canonical).is_absolute():
+        return
+    with paths.locked(paths.state_path(session_id)):
+        state = load_state(session_id)
+        if state.get("host") == host and state.get("cwd") == canonical:
+            return
+        state["host"] = host
+        state["cwd"] = canonical
+        save_state(session_id, state)
+
+
+def recorded_session_cwd(session_id, expected_host):
+    """Fallback cwd recorded by a profile binding or hook state for the expected host."""
+    from . import profiles
+
+    try:
+        bound = profiles.binding(paths.data_dir(), session_id)
+    except profiles.ProfileError:
+        bound = None
+    if (
+        bound
+        and bound.get("host") == expected_host
+        and isinstance(bound.get("cwd"), str)
+        and Path(bound["cwd"]).is_absolute()
+    ):
+        return bound["cwd"]
+    try:
+        state = load_state(session_id)
+    except ValueError:
+        return None
+    cwd = state.get("cwd")
+    if state.get("host") == expected_host and isinstance(cwd, str) and Path(cwd).is_absolute():
+        return cwd
+    return None
 
 
 def publish(key, message, box="new"):
@@ -201,7 +244,8 @@ def receive(session_id, cwd=None, mark=True, host=None):
             message = read_message(directory / name)
             if (
                 message is None
-                or message.get("path") != root
+                or not isinstance(message.get("path"), str)
+                or paths.resolved(message["path"]) != root
                 or message.get("from_id") == session_id
                 or (
                     message.get("pair_id")

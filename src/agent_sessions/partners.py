@@ -235,7 +235,7 @@ def create_partner(host, directory, brief, caller_id, found, project_id=None, pr
         raise ValueError("partner brief must not be empty")
     if profile_id:
         profile = profiles.load(paths.data_dir(), profile_id)
-        if profile["host"] != host or profile["cwd"] != root:
+        if profile["host"] != host or paths.resolved(profile["cwd"]) != root:
             raise profiles.ProfileError("partner host/directory does not match the profile")
     if host == "codex" and not project_id and not profile_id:
         raise ValueError("Codex partners require --project-id from codex_app list_projects")
@@ -320,7 +320,7 @@ def check_partner_profile(pair, session_id):
         or receipt["profile"] != profile["id"]
         or receipt["state"] != "configured"
         or receipt["host"] != profile["host"]
-        or receipt["cwd"] != profile["cwd"]
+        or paths.resolved(receipt["cwd"]) != paths.resolved(profile["cwd"])
     ):
         raise profiles.ProfileError(
             "partner has no matching profile launch receipt; use profile launch"
@@ -359,7 +359,7 @@ def attach_partner(session_id, caller_id, found, profile_id=None):
     if profile_id:
         pair["profile"] = profile_id
         profile = check_partner_profile(pair, session_id)
-        if profile["host"] != peer["host"] or profile["cwd"] != peer_cwd:
+        if profile["host"] != peer["host"] or paths.resolved(profile["cwd"]) != peer_cwd:
             raise profiles.ProfileError("existing worker host/directory does not match the profile")
     for existing in all_pairs():
         if (
@@ -423,6 +423,15 @@ def launch_profile(
             "argv": command,
             "environment": marker,
         }
+    from . import hooks
+
+    hook_info = hooks.hook_status(profile["host"])
+    if not hook_info["installed"]:
+        print(
+            f"agent-sessions: warning: {profile['host']} hooks are not registered in "
+            f"{hook_info['path']}; run 'agent-sessions configure {profile['host']}'",
+            file=sys.stderr,
+        )
     env = {**os.environ, **marker}
     for var in paths.FOREIGN_SESSION_ENVS:
         env.pop(var, None)
@@ -470,16 +479,20 @@ def launch_profile(
 
 def claim_invitation(pair):
     """Remove a connected pair's invitation from its directory queue and tell the caller."""
-    directory = paths.queue_dir(paths.path_key(pair["partner"]["cwd"]))
-    for name in queue.listing(directory):
-        message = queue.read_message(directory / name)
-        if message and message.get("pair_id") == pair["id"]:
-            queue.take(
-                directory / name,
-                message,
-                pair["partner"]["id"],
-                f"ready: {pair['partner']['id']} connected to pair {pair['id']}",
-            )
+    raw_cwd = pair["partner"]["cwd"]
+    canonical_cwd = paths.resolved(raw_cwd)
+    roots = [canonical_cwd] if canonical_cwd == raw_cwd else [canonical_cwd, raw_cwd]
+    for root in roots:
+        directory = paths.queue_dir(paths.path_key(root))
+        for name in queue.listing(directory):
+            message = queue.read_message(directory / name)
+            if message and message.get("pair_id") == pair["id"]:
+                queue.take(
+                    directory / name,
+                    message,
+                    pair["partner"]["id"],
+                    f"ready: {pair['partner']['id']} connected to pair {pair['id']}",
+                )
 
 
 def connect_partner(pair_id, session_id, caller_id, found, host_id=None, *, caller_host=None):
@@ -525,10 +538,11 @@ def connect_partner(pair_id, session_id, caller_id, found, host_id=None, *, call
         if len(matches_peer) > 1:
             raise ValueError(_ambiguity_error("partner", session_id, matches_peer))
         peer = matches_peer[0]
+        expected_cwd = paths.resolved(expected["cwd"])
         matches = (
-            paths.resolved(peer["cwd"]) == expected["cwd"]
+            paths.resolved(peer["cwd"]) == expected_cwd
             if peer["host"] == "codex"
-            else paths.inside(paths.resolved(peer["cwd"]), expected["cwd"])
+            else paths.inside(paths.resolved(peer["cwd"]), expected_cwd)
         )
         if not matches:
             raise ValueError("partner session is working in a different directory")
