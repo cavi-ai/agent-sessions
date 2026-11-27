@@ -398,6 +398,41 @@ config = [{name = "painter", enabled = false}]
         self.assertEqual(configured.returncode, 0, configured.stderr)
         self.assertNotIn('hooks are not registered', configured.stderr)
 
+    def test_opencode_profile_launch_continues_when_plugin_cannot_be_read(self):
+        profile, _ = self.profile('opencode')
+        binary = self.root / 'bin'
+        binary.mkdir()
+        executable = binary / 'opencode'
+        executable.write_text('#!/bin/sh\nprintf "host launched\\n"\n')
+        executable.chmod(0o755)
+        env = {**self.env, 'PATH': str(binary) + os.pathsep + self.env['PATH']}
+        plugin = self.opencode_config / 'plugins' / 'agent-sessions.ts'
+        plugin.parent.mkdir(parents=True)
+
+        for invalid_plugin in ('invalid UTF-8', 'symlink loop'):
+            with self.subTest(invalid_plugin=invalid_plugin):
+                if invalid_plugin == 'invalid UTF-8':
+                    plugin.write_bytes(b'\xff')
+                else:
+                    plugin.unlink()
+                    plugin.symlink_to(plugin.name)
+                launched = subprocess.run(
+                    [*TOOL_CMD, 'profile', 'launch', profile['id']],
+                    env=env, capture_output=True, text=True, timeout=30, check=False,
+                )
+                self.assertEqual(launched.returncode, 0, launched.stderr)
+                self.assertEqual(launched.stdout, 'host launched\n')
+                self.assertIn('hooks are not registered', launched.stderr)
+
+                check = subprocess.run(
+                    [*TOOL_CMD, '--json', 'configure', 'opencode', '--check'],
+                    env=env, capture_output=True, text=True, timeout=30, check=False,
+                )
+                self.assertEqual(check.returncode, 1, check.stderr)
+                status = json.loads(check.stdout)
+                self.assertFalse(status['installed'])
+                self.assertTrue(status['error'])
+
     def test_claude_subagent_preserves_messages_and_profile_guard(self):
         profile, config = self.profile('claude')
         self.run_tool('send', 'claude-0006', 'for the main thread')

@@ -88,18 +88,16 @@ def _detect_hook_host(payload, session_id=None, host=None):
     return None
 
 
-def _hook_cwd(payload):
-    if payload.get("cwd"):
-        candidate = hosts._uri_to_path(payload["cwd"])
-        if candidate:
-            return candidate
+def _hook_workspaces(payload):
+    candidate = hosts._uri_to_path(payload.get("cwd"))
+    if candidate:
+        yield candidate
     ws = payload.get("workspacePaths")
     if isinstance(ws, list):
         for item in ws:
             candidate = hosts._uri_to_path(item)
             if candidate:
-                return candidate
-    return os.getcwd()
+                yield candidate
 
 
 def hook(payload, minutes=paths.ACTIVE_MINUTES, host=None):
@@ -139,7 +137,9 @@ def hook(payload, minutes=paths.ACTIVE_MINUTES, host=None):
         and payload.get("source") not in ("resume", "compact")
     ):
         queue.record_start(session_id)
-    cwd = _hook_cwd(payload)
+    workspaces = _hook_workspaces(payload)
+    explicit_cwd = next(workspaces, None)
+    cwd = explicit_cwd or os.getcwd()
     paths.validate_session_id(session_id)
     expected = None
     marker = os.environ.get("AGENT_SESSIONS_PROFILE_ID")
@@ -153,8 +153,10 @@ def hook(payload, minutes=paths.ACTIVE_MINUTES, host=None):
             raise profiles.ProfileError("session has conflicting partner profiles")
         expected = next(iter(bound), None)
     profiles.guard(paths.data_dir(), session_id, cwd, host, marker, paths.write_json, expected)
-    if host == "agy" and not payload.get("agent_id") and cwd:
-        queue.record_session_context(session_id, host, cwd)
+    if host == "agy" and not payload.get("agent_id"):
+        candidates = (explicit_cwd, *workspaces)
+        workspace = next((p for p in candidates if p and Path(p).is_absolute()), None)
+        queue.record_session_context(session_id, host, workspace)
     # Subagents share the session id; guard the profile but leave messages
     # and start tracking for the main thread.
     if host == "agy":
@@ -427,14 +429,14 @@ def hook_status(host):
     if host not in paths.HOSTS:
         raise ValueError(f"unsupported host: {host}")
     if host == "opencode":
-        path = (paths.opencode_config_dir() / "plugins" / paths.OPENCODE_PLUGIN).resolve()
+        path = (paths.opencode_config_dir() / "plugins" / paths.OPENCODE_PLUGIN).absolute()
         events = {event: False for event in OPENCODE_HOOK_EVENTS}
         error = None
         try:
             text = path.read_text(encoding="utf-8")
         except FileNotFoundError:
             text = None
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
             text = None
             error = str(exc)
         if text is not None:
@@ -456,7 +458,7 @@ def hook_status(host):
 
     command = shlex.join(_hook_argv(host))
     if host == "agy":
-        path = (paths.agy_config_dir() / "hooks.json").resolve()
+        path = (paths.agy_config_dir() / "hooks.json").absolute()
         events = {event: False for event in AGY_HOOK_EVENTS}
         error = None
         try:
@@ -518,7 +520,7 @@ def hook_status(host):
         (paths.codex_home() / "hooks.json")
         if host == "codex"
         else (paths.claude_home() / "settings.json")
-    ).resolve()
+    ).absolute()
     events = {event: False for event in paths.NATIVE_HOOK_EVENTS}
     error = None
     try:

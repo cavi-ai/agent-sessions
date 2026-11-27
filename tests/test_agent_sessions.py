@@ -578,6 +578,48 @@ class ClaudeHostTests(Machine):
 
 
 class ClaimTests(Machine):
+    def test_upgrade_preserves_mixed_case_path_messages_and_receipts(self):
+        workspace = self.root / "CaseRepo"
+        workspace.mkdir()
+        old_path = self.root / "caserepo"
+        if not old_path.is_dir():
+            self.skipTest("case-sensitive filesystem")
+        old_hash = hashlib.sha256(str(old_path).encode()).hexdigest()[:16]
+        old_queue = self.data / "queue" / ("p-" + old_hash) / "new"
+        old_queue.mkdir(parents=True)
+        legacy = self.data / "paths"
+        legacy.mkdir()
+        message = {
+            "id": "before-upgrade", "path": str(old_path), "from": "peer",
+            "from_id": "codex-main-0001", "at": "2026-01-01T00:00:00Z",
+            "text": "queued before the upgrade",
+        }
+        (old_queue / "before-upgrade.json").write_text(json.dumps(message))
+        (legacy / (old_hash + ".jsonl")).write_text(json.dumps({
+            **message, "id": "legacy-path", "text": "queued in the legacy inbox",
+        }) + "\n")
+        receipt = self.data / "receipts" / "before-upgrade" / "already-saw-it"
+        receipt.parent.mkdir(parents=True)
+        receipt.touch()
+
+        def inbox(session_id):
+            output = subprocess.run(
+                [*TOOL_CMD, "--json", "inbox", "--session", session_id], cwd=workspace,
+                env=self.env, capture_output=True, text=True, timeout=30, check=True,
+            )
+            return [item["id"] for item in json.loads(output.stdout)]
+
+        self.assertEqual(inbox("already-saw-it"), ["legacy-path"])
+        self.assertCountEqual(inbox("new-recipient"), ["before-upgrade", "legacy-path"])
+        claimed = subprocess.run(
+            [*TOOL_CMD, "--json", "claim", "before-upgrade", "--session", "new-recipient"],
+            cwd=workspace, env=self.env, capture_output=True, text=True, timeout=30,
+            check=False,
+        )
+        self.assertEqual(claimed.returncode, 0, claimed.stderr)
+        self.assertEqual(json.loads(claimed.stdout)["claimed"]["claimed_by"], "new-recipient")
+        self.assertEqual(inbox("later-recipient"), ["legacy-path"])
+
     def test_legacy_migration_waits_for_delivery_state_repair_without_replay(self):
         for kind in ("inbox", "paths"):
             with self.subTest(kind=kind):
@@ -1069,6 +1111,19 @@ class AgyHostTests(Machine):
                 "workspacePaths": [str(self.repo)],
             }),
         )
+        for workspace_fields in ({}, {"cwd": "relative"}, {"workspacePaths": ["relative"]}):
+            with self.subTest(workspace_fields=workspace_fields):
+                subprocess.run(
+                    [*TOOL_CMD, "hook", "--host", "agy"], cwd=self.worktree, env=self.env,
+                    input=json.dumps({
+                        "conversationId": "agy-unprofiled-empty-2",
+                        "hookEventName": "PostToolUse",
+                        **workspace_fields,
+                    }),
+                    capture_output=True, text=True, timeout=30, check=True,
+                )
+                state = self.data / "state" / "agy-unprofiled-empty-2.json"
+                self.assertEqual(json.loads(state.read_text())["cwd"], str(self.repo))
 
         found = {s["id"]: s for s in json.loads(self.run_tool("--json", "list", "--host", "agy"))}
         self.assertEqual(set(found), {"agy-empty-uri-1", "agy-unprofiled-empty-2"})

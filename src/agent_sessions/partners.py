@@ -479,6 +479,7 @@ def launch_profile(
 
 def claim_invitation(pair):
     """Remove a connected pair's invitation from its directory queue and tell the caller."""
+    queue.migrate_path_queue_keys()
     raw_cwd = pair["partner"]["cwd"]
     canonical_cwd = paths.resolved(raw_cwd)
     roots = [canonical_cwd] if canonical_cwd == raw_cwd else [canonical_cwd, raw_cwd]

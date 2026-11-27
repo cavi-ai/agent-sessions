@@ -53,11 +53,9 @@ def record_start(session_id, started=None):
 
 def record_session_context(session_id, host, cwd):
     """Remember a session's host and canonical cwd when native metadata omits workspace URIs."""
-    if not host or not cwd:
+    if not host or not cwd or not Path(cwd).is_absolute():
         return
     canonical = paths.resolved(cwd)
-    if not Path(canonical).is_absolute():
-        return
     with paths.locked(paths.state_path(session_id)):
         state = load_state(session_id)
         if state.get("host") == host and state.get("cwd") == canonical:
@@ -220,9 +218,11 @@ def receive(session_id, cwd=None, mark=True, host=None):
     """New messages for a session: its own queue, then queues of directories holding cwd.
 
     Receiving marks a message received; it stays in the queue until an agent claims it. Cost
-    is one folder listing per ancestor of cwd plus the new messages, not the message history.
+    after migration is one folder listing per ancestor of cwd plus the new messages.
     """
     migrate_legacy()
+    if cwd:
+        migrate_path_queue_keys()
     started = load_state(session_id).get("started")
     key = paths.session_key(session_id)
     messages = []
@@ -276,6 +276,7 @@ def find_message(message_id, session_id, cwd):
     key = paths.session_key(session_id)
     folders = [paths.queue_dir(key, "cur"), paths.queue_dir(key)]
     if cwd:
+        migrate_path_queue_keys()
         folders += [paths.queue_dir(paths.path_key(root)) for root in paths.ancestors(paths.resolved(cwd))]
     return next(
         (path for path in (paths.message_file(folder, message_id) for folder in folders) if path.exists()),
@@ -334,6 +335,7 @@ def claim(message_id, path, session_id, text="ready", sender_name=None):
 def status(message_id):
     """Whether a message is pending, received (and by whom) or claimed."""
     done = paths.message_file(paths.data_dir() / "claimed", message_id)
+    migrate_path_queue_keys()
     if done.exists():
         message = read_message(done) or {}
         return {
@@ -389,7 +391,7 @@ def migrate_legacy():
             for message in read_inbox(path):
                 if not message.get("path"):
                     continue
-                publish(paths.path_key(message["path"]), message)
+                publish(paths.path_key(paths.resolved(message["path"])), message)
                 for session in delivered.get(message["id"], ()):
                     if paths.SESSION_ID_RE.fullmatch(session):
                         receipt = paths.private_dir(paths.receipt_dir(message["id"])) / session
@@ -397,6 +399,35 @@ def migrate_legacy():
         for folder in legacy:
             if folder.is_dir():
                 folder.rename(folder.with_name(f"{folder.name}.migrated-{uuid.uuid4().hex[:8]}"))
+
+
+def migrate_path_queue_keys():
+    """Rekey pre-canonicalization macOS queues, leaving receipt files keyed by message ID."""
+    if sys.platform != "darwin":
+        return
+    root = paths.data_dir()
+    queued = root / "queue"
+    complete = root / "path-queue-keys-v1.json"
+    if complete.is_file() or not queued.is_dir():
+        return
+    with paths.locked(root / "migration"):
+        if complete.is_file():
+            return
+        canonical_keys = {}
+        for directory in queued.glob("p-*/new"):
+            for name in listing(directory):
+                source = directory / name
+                message = read_message(source)
+                address = message.get("path") if message else None
+                if not address or paths.path_key(address) != directory.parent.name:
+                    continue
+                if address not in canonical_keys:
+                    canonical_keys[address] = paths.path_key(paths.resolved(address))
+                target_key = canonical_keys[address]
+                if target_key != directory.parent.name:
+                    target = paths.private_dir(paths.queue_dir(target_key)) / name
+                    os.replace(source, target)
+        paths.write_json(complete, True)
 
 
 def describe_message(message):
